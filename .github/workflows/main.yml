@@ -1,19 +1,17 @@
 name: Hermes Agent — Telegram + Local (all tools)
 
 on:
-  workflow_dispatch:        # triggered manually or by cron-job.org via GitHub API
+  workflow_dispatch:
 
 concurrency:
   group: hermes-agent
-  cancel-in-progress: false   # if a trigger fires while running, queue it
+  cancel-in-progress: false
 
 env:
-  # OpenRouter slug for Tencent Hy3 free tier. If your Hermes build wants the
-  # raw slug, use "tencent/hy3:free" instead. Verify with: hermes models
   HERMES_MODEL: "openrouter/tencent/hy3:free"
-  RUN_MINUTES: 330            # gateway runtime before graceful shutdown + state save
+  RUN_MINUTES: 330            # total budget from job start (wait time included)
   HERMES_HOME: /home/runner/.hermes
-  DATA_REPO: jahid12525/harmesprivatestorage   # PRIVATE data-storage repo
+  DATA_REPO: jahid12525/harmesprivatestorage
 
 jobs:
   hermes:
@@ -21,32 +19,68 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      # ── 1. Pull ALL Hermes data from private repo (+ reassemble chunked files) ──
+      # ── 0. Acquire global lock: only ONE Hermes run anywhere, ever ──
+      # Atomic: creating the 'lock' branch fails if it exists (no race possible).
+      # Waits up to ~90 min, stealing the lock if its heartbeat is >20 min stale.
+      - name: Acquire global run lock
+        env:
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+        run: |
+          date +%s > /tmp/job_start
+          REPO_URL="https://x-access-token:${DATA_REPO_TOKEN}@github.com/${DATA_REPO}.git"
+          for attempt in $(seq 1 90); do
+            rm -rf /tmp/lockchk
+            if git clone -q --depth 1 --branch lock "$REPO_URL" /tmp/lockchk 2>/dev/null; then
+              HB=$(cat /tmp/lockchk/HEARTBEAT 2>/dev/null || echo 0)
+              AGE=$(( $(date +%s) - HB ))
+              if [ "$AGE" -lt 1200 ]; then
+                echo "🔒 Another run active (heartbeat ${AGE}s ago) — waiting... (attempt $attempt)"
+                sleep 60
+                continue
+              fi
+              echo "💀 Stale lock (${AGE}s) — previous run died. Stealing lock."
+              git push -q "$REPO_URL" --delete lock 2>/dev/null || true
+            fi
+            # Try to acquire (atomic: fails if branch appeared meanwhile)
+            rm -rf /tmp/lock && mkdir /tmp/lock && cd /tmp/lock
+            git init -q -b lock
+            git config user.name hermes-lock
+            git config user.email lock@local
+            date +%s > HEARTBEAT
+            echo "${{ github.repository }} run=${{ github.run_id }}" > OWNER
+            git add -A && git commit -qm "lock"
+            if git push -q "$REPO_URL" lock 2>/dev/null; then
+              echo "✅ Lock acquired"
+              exit 0
+            fi
+            echo "Lost acquisition race — retrying in 30s"
+            sleep 30
+          done
+          echo "❌ Could not acquire lock within 90 min — giving up"
+          exit 1
+
+      # ── 1. Pull Hermes data (+ reassemble chunked files) ──
       - name: Pull Hermes data from private data repo
         run: |
           git clone --depth 1 \
             "https://x-access-token:${{ secrets.DATA_REPO_TOKEN }}@github.com/${DATA_REPO}.git" \
             "$HERMES_HOME" || mkdir -p "$HERMES_HOME"
-          # Never trust a committed .env — it gets rebuilt from secrets below
           rm -f "$HERMES_HOME/.env"
-
-          # Reassemble any files that were split into <100MB chunks on push
           find "$HERMES_HOME" -name "*.gh-chunk.000" | while read -r first; do
             base="${first%.gh-chunk.000}"
             cat "$base".gh-chunk.* > "$base"
             rm -f "$base".gh-chunk.*
             echo "Reassembled: $base"
           done
-
           echo "Restored $(du -sh "$HERMES_HOME" 2>/dev/null | cut -f1) of Hermes data"
 
-      # ── 2. Install Hermes Agent (CLI-only installer) ──
+      # ── 2. Install Hermes Agent ──
       - name: Install Hermes Agent
         run: |
           curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # ── 3. Free search backend: self-hosted SearXNG (JSON API enabled) ──
+      # ── 3. SearXNG (JSON API enabled) ──
       - name: Start SearXNG (free web search backend)
         run: |
           mkdir -p "$PWD/searxng"
@@ -72,7 +106,7 @@ jobs:
           done
           echo "SearXNG JSON API failed to start"; docker logs searxng; exit 1
 
-      # ── 4. Camoufox stealth browser (headless server) ──
+      # ── 4. Camoufox ──
       - name: Install & start Camoufox
         run: |
           pip install -U "camoufox[geoip]"
@@ -84,9 +118,7 @@ jobs:
             sleep 2
           done
 
-      # ── 5. Secrets → ~/.hermes/.env (rebuilt fresh every run, never committed) ──
-      # Free-only: no FAL_KEY (image gen removed), no ELEVENLABS_API_KEY (Edge TTS).
-      # GROQ_API_KEY is optional — free tier, makes voice transcription fast.
+      # ── 5. Secrets → .env ──
       - name: Write Hermes .env
         run: |
           mkdir -p "$HERMES_HOME"
@@ -100,26 +132,32 @@ jobs:
           EOF
           chmod 600 "$HERMES_HOME/.env"
 
-      # ── 6. Non-secret config → config.yaml (persisted to data repo automatically) ──
+      # ── 6. Configure Hermes ──
       - name: Configure Hermes (model, search, TTS, tools)
         run: |
           hermes config set model "$HERMES_MODEL"
           hermes config set web.search_backend searxng
-
-          # Free TTS: Microsoft Edge TTS (default provider, no API key)
           hermes config set tts.provider edge
-
-          # Toolsets: image_gen removed (FAL-only, paid). tts kept (Edge is free).
-          # Verify exact toolset names on your version with: hermes tools
           hermes config set toolsets '["terminal","files","web","browser","code","vision","tts","memory","skills","delegation","cron"]'
           hermes doctor || true
 
-      # ── 7. Start periodic mid-run backup (every 30 min → 'backup' branch) ──
-      # Insurance against runner death: worst-case data loss drops to ~30 min.
-      - name: Start periodic data backup
+      # ── 7. Background loops: heartbeat (10 min) + data backup (30 min) ──
+      - name: Start heartbeat + periodic backup
         env:
           DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
         run: |
+          cat > /tmp/heartbeat.sh <<'HB'
+          #!/bin/bash
+          TMP=$(mktemp -d); cd "$TMP"
+          git init -q -b lock
+          git config user.name hermes-lock
+          git config user.email lock@local
+          date +%s > HEARTBEAT
+          echo "$GITHUB_REPOSITORY run=$GITHUB_RUN_ID" > OWNER
+          git add -A && git commit -qm "heartbeat"
+          git push -qf "https://x-access-token:${DATA_REPO_TOKEN}@github.com/${DATA_REPO}.git" lock
+          cd / && rm -rf "$TMP"
+          HB
           cat > /tmp/sync.sh <<'SYNC'
           #!/bin/bash
           cd "$HERMES_HOME" || exit 0
@@ -136,27 +174,27 @@ jobs:
           git add -A && git commit -qm "mid-run backup $(date -u +%H:%M)" && git push -qf origin backup
           rm -rf "$TMP"
           SYNC
-          chmod +x /tmp/sync.sh
+          chmod +x /tmp/heartbeat.sh /tmp/sync.sh
+          nohup bash -c 'while true; do sleep 600; /tmp/heartbeat.sh; done' > /tmp/hb.log 2>&1 &
           nohup bash -c 'while true; do sleep 1800; /tmp/sync.sh; done' > /tmp/sync.log 2>&1 &
-          echo "Backup loop started"
+          echo "Heartbeat + backup loops started"
 
-      # ── 8. Notify: bot online ──
+      # ── 8. Notify online ──
       - name: Notify bot online (Telegram)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
         run: |
           curl -s -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            "{{https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}}}/sendMessage" \
             -d chat_id="${TELEGRAM_USER_ID}" \
-            -d text="🟢 Hermes online (run ${{ github.run_id }}, up for ~${RUN_MINUTES} min)" > /dev/null || true
+            -d text="🟢 Hermes online (run ${{ github.run_id }})" > /dev/null || true
 
-      # ── 9. Run the Telegram gateway with crash auto-restart ──
-      # If hermes crashes, restart it within the remaining time budget.
-      # -k 60: give Hermes 60s after SIGTERM to flush state before SIGKILL.
+      # ── 9. Gateway with crash auto-restart (budget counted from JOB start) ──
       - name: Run Hermes gateway (Telegram bot)
         run: |
-          END=$(( $(date +%s) + RUN_MINUTES * 60 ))
+          JOB_START=$(cat /tmp/job_start)
+          END=$(( JOB_START + RUN_MINUTES * 60 ))
           while [ "$(date +%s)" -lt "$END" ]; do
             REMAIN=$(( (END - $(date +%s)) / 60 ))
             [ "$REMAIN" -lt 2 ] && break
@@ -165,29 +203,22 @@ jobs:
             sleep 10
           done
 
-      # ── 10. Push ALL Hermes data back (+ split files >90MB into chunks) ──
-      # Snapshot-style: fresh single commit force-pushed each run, so the data
-      # repo never accumulates history/bloat from binary session files.
-      # Runs even on failure/cancel (if: always()) so state is saved.
+      # ── 10. Push data back (+ chunk >90MB files) ──
       - name: Push Hermes data to private data repo
         if: always()
         run: |
           cd "$HERMES_HOME"
-          # Scrub anything secret before committing
           rm -f .env
           rm -rf .git
           cat > .gitignore <<'EOF'
           .env
           *.log
           EOF
-
-          # GitHub rejects files >100MB. Split anything >90MB into 90MB chunks.
           find . -type f -size +90M ! -name "*.gh-chunk.*" | while read -r f; do
             split -b 90M -d -a 3 "$f" "$f.gh-chunk."
             rm "$f"
             echo "Chunked: $f"
           done
-
           git init -b main
           git config user.name "hermes-runner"
           git config user.email "hermes-runner@users.noreply.github.com"
@@ -197,7 +228,17 @@ jobs:
           git commit -m "hermes data sync $(date -u +'%Y-%m-%dT%H:%M:%SZ') (run ${{ github.run_id }})" || echo "Nothing to commit"
           git push --force origin main
 
-      # ── 11. Notify: run failed ──
+      # ── 11. Release the global lock (AFTER data is pushed) ──
+      - name: Release global run lock
+        if: always()
+        env:
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+        run: |
+          git push -q "https://x-access-token:${DATA_REPO_TOKEN}@github.com/${DATA_REPO}.git" \
+            --delete lock 2>/dev/null || true
+          echo "Lock released"
+
+      # ── 12. Notify failure ──
       - name: Notify failure (Telegram)
         if: failure()
         env:
@@ -205,6 +246,6 @@ jobs:
           TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
         run: |
           curl -s -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            "{{https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}}}/sendMessage" \
             -d chat_id="${TELEGRAM_USER_ID}" \
             -d text="🔴 Hermes run ${{ github.run_id }} FAILED — check Actions logs" > /dev/null || true

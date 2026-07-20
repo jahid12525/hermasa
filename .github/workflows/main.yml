@@ -1,0 +1,112 @@
+name: Hermes Agent — Telegram + Local (all tools)
+
+on:
+  workflow_dispatch:        # run manually
+  schedule:
+    - cron: "0 */6 * * *"   # auto-restart every 6h (GitHub kills jobs at ~6h)
+
+concurrency:
+  group: hermes-agent
+  cancel-in-progress: false
+
+env:
+  # ⚠️ Set the exact OpenRouter slug for the HY3 free model here
+  # (check https://openrouter.ai/models?q=free — free models end with ":free")
+  HERMES_MODEL: "openrouter/hy3:free"
+  RUN_MINUTES: 330          # gateway runtime before graceful shutdown + state save
+
+jobs:
+  hermes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      # ── 1. Restore skills + memory + sessions from the previous run ──
+      - name: Restore Hermes data (skills, memory, sessions)
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.hermes
+          key: hermes-data-${{ github.run_id }}
+          restore-keys: |
+            hermes-data-
+
+      # ── 2. Install Hermes Agent (CLI-only installer) ──
+      - name: Install Hermes Agent
+        run: |
+          curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # ── 3. Free search backend: self-hosted SearXNG (no API key needed) ──
+      - name: Start SearXNG (free web search backend)
+        run: |
+          docker run -d --name searxng -p 8080:8080 searxng/searxng:latest
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8080 >/dev/null 2>&1 && break
+            sleep 2
+          done
+
+      # ── 4. Camoufox stealth browser (headless server) ──
+      - name: Install & start Camoufox
+        run: |
+          pip install -U "camoufox[geoip]"
+          python -m camoufox fetch
+          nohup python -c "from camoufox.server import launch_server; launch_server(headless=True, port=9222, ws_path='hermes')" \
+            > camoufox.log 2>&1 &
+          sleep 10
+
+      # ── 5. Secrets → ~/.hermes/.env (Hermes reads secrets from here) ──
+      - name: Write Hermes .env
+        run: |
+          mkdir -p ~/.hermes
+          cat > ~/.hermes/.env <<EOF
+          OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ALLOWED_USERS=${{ secrets.TELEGRAM_USER_ID }}
+          SEARXNG_URL=http://localhost:8080
+          CAMOFOX_URL=ws://127.0.0.1:9222/hermes
+          FAL_KEY=${{ secrets.FAL_KEY }}
+          ELEVENLABS_API_KEY=${{ secrets.ELEVENLABS_API_KEY }}
+          EOF
+          chmod 600 ~/.hermes/.env
+
+      # ── 6. Non-secret config → config.yaml via hermes config set ──
+      - name: Configure Hermes (model, search, tools)
+        run: |
+          hermes config set model "$HERMES_MODEL"
+
+          # Free search method: SearXNG for search (extract falls back to browser)
+          hermes config set web.search_backend searxng
+
+          # Enable ALL toolsets (terminal, files, web, browser, code,
+          # vision_analyze, image_generate, text_to_speech, memory, skills…)
+          # Verify exact toolset names on your version with: hermes tools
+          hermes config set toolsets '["terminal","files","web","browser","code","vision","image_gen","tts","memory","skills","delegation","cron"]'
+
+          hermes doctor || true
+
+      # ── 7. Run the Telegram gateway (also serves local/CLI operation) ──
+      - name: Run Hermes gateway (Telegram bot)
+        run: |
+          timeout "${RUN_MINUTES}m" hermes gateway || true
+
+      # ── 8. Persist skills + data for the next run ──
+      - name: Scrub secrets before saving state
+        if: always()
+        run: rm -f ~/.hermes/.env
+
+      - name: Save Hermes data for next run
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.hermes
+          key: hermes-data-${{ github.run_id }}
+
+      - name: Upload backup artifact (skills + data)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-data-backup-${{ github.run_id }}
+          path: |
+            ~/.hermes
+            !~/.hermes/.env
+          retention-days: 30

@@ -8,8 +8,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  HERMES_MODEL: "openai/gpt-oss-120b:free"   # primary (native tool calling)
-  LOCAL_MODEL: "qwen3:8b"                    # local fallback via Ollama
+  HERMES_MODEL: "nvidia/nemotron-3-super-120b-a12b:free"   # primary (free, tool calling, 1M ctx)
+  LOCAL_MODEL: "qwen3.5:4b"                                # local fallback (tools, 262K ctx, ~3GB)
   RUN_MINUTES: 330            # total budget from job start (wait time included)
   HERMES_HOME: /home/runner/.hermes
   DATA_REPO: jahid12525/harmesprivatestorage
@@ -85,11 +85,11 @@ jobs:
           curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # ── 2.5 Ollama + local fallback model (no rate limits, offline-safe) ──
+      # ── 2.5 Ollama + local fallback model (64K+ context for Hermes) ──
       - name: Install Ollama + pull local fallback model
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
-          nohup ollama serve > /tmp/ollama.log 2>&1 &
+          nohup env OLLAMA_CONTEXT_LENGTH=65536 ollama serve > /tmp/ollama.log 2>&1 &
           for i in $(seq 1 30); do
             curl -fsS http://localhost:11434/api/tags >/dev/null 2>&1 && break
             sleep 2
@@ -135,7 +135,7 @@ jobs:
             sleep 2
           done
 
-      # ── 5. Secrets → .env ──
+      # ── 5. Secrets → .env (no OLLAMA_API_KEY — it triggers ollama-cloud 401) ──
       - name: Write Hermes .env
         run: |
           mkdir -p "$HERMES_HOME"
@@ -146,16 +146,15 @@ jobs:
           SEARXNG_URL=http://localhost:8080
           CAMOUFOX_URL=ws://127.0.0.1:9222/hermes
           GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}
-          OLLAMA_API_KEY=ollama
+          LOCAL_API_KEY=ollama
           EOF
           chmod 600 "$HERMES_HOME/.env"
 
       # ── 6. Configure Hermes (model, local fallback, search, TTS, tools) ──
       - name: Configure Hermes
         run: |
-          hermes config set providers.local.type openai-compatible
           hermes config set providers.local.base_url "http://localhost:11434/v1"
-          hermes config set providers.local.api_key_env OLLAMA_API_KEY
+          hermes config set providers.local.api_key_env LOCAL_API_KEY
           hermes config set model "$HERMES_MODEL"
           hermes config set web.search_backend searxng
           hermes config set tts.provider edge
@@ -207,7 +206,7 @@ jobs:
           TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
         run: |
           curl -s -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            "{{https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}}}/sendMessage" \
             -d chat_id="${TELEGRAM_USER_ID}" \
             -d text="🟢 Hermes online (run ${{ github.run_id }}) — model: ${HERMES_MODEL}, fallback: local/${LOCAL_MODEL}" > /dev/null || true
 
@@ -268,6 +267,6 @@ jobs:
           TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
         run: |
           curl -s -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            "{{https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}}}/sendMessage" \
             -d chat_id="${TELEGRAM_USER_ID}" \
             -d text="🔴 Hermes run ${{ github.run_id }} FAILED — check Actions logs" > /dev/null || true

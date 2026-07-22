@@ -1,3 +1,4 @@
+
 name: Hermes Agent — Telegram + NVIDIA (all tools)
 
 on:
@@ -117,6 +118,7 @@ jobs:
           echo "$FOUND verified models added to failover pool"
           cat >> /tmp/litellm.yaml <<'EOF'
           litellm_settings:
+            drop_params: true
             num_retries: 3
             request_timeout: 300
           router_settings:

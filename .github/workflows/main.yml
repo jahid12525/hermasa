@@ -144,25 +144,25 @@ jobs:
             sleep 2
           done
           if [ "$UP" != "1" ]; then
-            echo "❌ LiteLLM proxy failed to start — log:"
+            echo "LiteLLM proxy failed to start — log:"
             tail -50 /tmp/litellm.log
             exit 1
           fi
-          echo "✅ LiteLLM proxy up — available models:"
+          echo "LiteLLM proxy up — available models:"
           curl -s http://localhost:4000/v1/models
           echo ""
-          echo "🧪 Testing a REAL completion through proxy → NVIDIA..."
+          echo "Testing a REAL completion through proxy -> NVIDIA..."
           RESP=$(curl -s -X POST http://localhost:4000/v1/chat/completions \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer sk-local-proxy" \
             -d '{"model":"smart","messages":[{"role":"user","content":"Reply with exactly: OK"}],"max_tokens":10}')
           echo "$RESP"
           if ! echo "$RESP" | grep -q '"content"'; then
-            echo "❌ Proxy → NVIDIA completion FAILED — litellm log:"
+            echo "Proxy -> NVIDIA completion FAILED — litellm log:"
             tail -80 /tmp/litellm.log
             exit 1
           fi
-          echo "✅ End-to-end completion works"
+          echo "End-to-end completion works"
 
       # ── 5. Write .env (NO NVIDIA_API_KEY — Hermes must not see it!) ──
       - name: Write .env
@@ -198,7 +198,7 @@ jobs:
           echo "── Final model config ──"
           hermes config get model || true
 
-      # ── 7. Background backup loop (every 30 min → backup branch) ──
+      # ── 7. Background backup loop (every 30 min -> backup branch) ──
       - name: Start backup loop
         env:
           DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
@@ -230,7 +230,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
         run: |
-          curl -s -X POST "{{https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}}}/sendMessage" \
+          TG_API="https://api.telegram.org"
+          curl -s -X POST "${TG_API}/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_USER_ID}" \
             -d text="🟢 Hermes Agent ONLINE — custom endpoint mode (proxy tested OK)" > /dev/null
 
@@ -280,6 +281,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
         run: |
-          curl -s -X POST "{{https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}}}/sendMessage" \
+          TG_API="https://api.telegram.org"
+          curl -s -X POST "${TG_API}/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_USER_ID}" \
             -d text="🔴 Hermes Agent run FAILED — check Actions logs" > /dev/null

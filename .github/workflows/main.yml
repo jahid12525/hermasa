@@ -1,4 +1,3 @@
-
 name: Hermes Agent — Telegram + NVIDIA (all tools)
 
 on:
@@ -98,7 +97,7 @@ jobs:
           fi
           jq -r '.data[].id' /tmp/nvidia_models.json > /tmp/nvidia_ids.txt
           echo "Account catalog has $(wc -l < /tmp/nvidia_ids.txt) models"
-          CANDIDATES="z-ai/glm-5.2 deepseek-ai/deepseek-v4-flash moonshotai/kimi-k2.6 nvidia/nemotron-3-super-120b-a12b nvidia/nemotron-3-nano-30b-a3b deepseek-ai/deepseek-v4-pro nvidia/nemotron-3-ultra-550b-a55b"
+          CANDIDATES="moonshotai/kimi-k2.6 deepseek-ai/deepseek-v4-flash nvidia/nemotron-3-nano-30b-a3b"
           echo "model_list:" > /tmp/litellm.yaml
           FOUND=0
           for M in $CANDIDATES; do

@@ -82,87 +82,13 @@ jobs:
           sleep 20
           echo "Camoufox launched"
 
-      # ── 4.5. Start LiteLLM failover proxy + END-TO-END TEST ──
-      - name: Start LiteLLM failover proxy
-        env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-        run: |
-          pip install -U "litellm[proxy]"
-          echo "Fetching this account's REAL model catalog from NVIDIA..."
-          HTTP=$(curl -s -o /tmp/nvidia_models.json -w "%{http_code}" https://integrate.api.nvidia.com/v1/models -H "Authorization: Bearer ${NVIDIA_API_KEY}")
-          if [ "$HTTP" != "200" ]; then
-            echo "Could not fetch NVIDIA model list (HTTP $HTTP):"
-            cat /tmp/nvidia_models.json
-            exit 1
-          fi
-          jq -r '.data[].id' /tmp/nvidia_models.json > /tmp/nvidia_ids.txt
-          echo "Account catalog has $(wc -l < /tmp/nvidia_ids.txt) models"
-          CANDIDATES="moonshotai/kimi-k2.6 deepseek-ai/deepseek-v4-flash nvidia/nemotron-3-nano-30b-a3b"
-          echo "model_list:" > /tmp/litellm.yaml
-          FOUND=0
-          for M in $CANDIDATES; do
-            if grep -qxF "$M" /tmp/nvidia_ids.txt; then
-              echo "  USING: $M"
-              printf '  - model_name: smart\n    litellm_params:\n      model: openai/%s\n      api_base: https://integrate.api.nvidia.com/v1\n      api_key: os.environ/NVIDIA_API_KEY\n' "$M" >> /tmp/litellm.yaml
-              FOUND=$((FOUND+1))
-            else
-              echo "  SKIPPING (not in this account's catalog): $M"
-            fi
-          done
-          if [ "$FOUND" -eq 0 ]; then
-            echo "NONE of the candidate models exist for this account. Full catalog below - pick chat models from here:"
-            cat /tmp/nvidia_ids.txt
-            exit 1
-          fi
-          echo "$FOUND verified models added to failover pool"
-          cat >> /tmp/litellm.yaml <<'EOF'
-          litellm_settings:
-            drop_params: true
-            num_retries: 3
-            request_timeout: 300
-          router_settings:
-            allowed_fails: 2
-            cooldown_time: 120
-            model_group_alias:
-              nvidia/smart: smart
-              nim/smart: smart
-          EOF
-          echo "--- Final litellm config ---"
-          cat /tmp/litellm.yaml
-          nohup litellm --config /tmp/litellm.yaml --port 4000 > /tmp/litellm.log 2>&1 &
-          UP=0
-          for i in $(seq 1 30); do
-            if curl -s http://localhost:4000/health/liveliness > /dev/null 2>&1; then
-              UP=1; break
-            fi
-            sleep 2
-          done
-          if [ "$UP" != "1" ]; then
-            echo "LiteLLM proxy failed to start — log:"
-            tail -50 /tmp/litellm.log
-            exit 1
-          fi
-          echo "LiteLLM proxy up — available models:"
-          curl -s http://localhost:4000/v1/models
-          echo ""
-          echo "Testing a REAL completion through proxy -> NVIDIA..."
-          RESP=$(curl -s -X POST http://localhost:4000/v1/chat/completions \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer sk-local-proxy" \
-            -d '{"model":"smart","messages":[{"role":"user","content":"Reply with exactly: OK"}],"max_tokens":10}')
-          echo "$RESP"
-          if ! echo "$RESP" | grep -q '"content"'; then
-            echo "Proxy -> NVIDIA completion FAILED — litellm log:"
-            tail -80 /tmp/litellm.log
-            exit 1
-          fi
-          echo "End-to-end completion works"
 
-      # ── 5. Write .env (NO NVIDIA_API_KEY — Hermes must not see it!) ──
+      # ── 5. Write .env (NVIDIA_API_KEY included — direct provider mode) ──
       - name: Write .env
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           mkdir -p "$HERMES_HOME"
@@ -171,20 +97,21 @@ jobs:
           TELEGRAM_ALLOWED_USERS=${TELEGRAM_USER_ID}
           SEARXNG_URL=http://localhost:8080
           CAMOUFOX_URL=ws://127.0.0.1:9222/hermes
+          NVIDIA_API_KEY=${NVIDIA_API_KEY}
           GROQ_API_KEY=${GROQ_API_KEY}
           EOF
 
-      # ── 6. Configure Hermes (official custom-endpoint pattern) ──
+      # ── 6. Configure Hermes (direct NVIDIA provider — manual /model selection) ──
       - name: Configure Hermes
         run: |
+          hermes config unset model.base_url || true
+          hermes config unset model.api_key || true
           hermes config unset providers.nvidia.base_url || true
           hermes config unset providers.nvidia.api_key_env || true
           hermes config unset providers.nim.base_url || true
           hermes config unset providers.nim.api_key_env || true
-          hermes config set model.default "smart"
-          hermes config set model.provider "custom"
-          hermes config set model.base_url "http://localhost:4000/v1"
-          hermes config set model.api_key "sk-local-proxy"
+          hermes config set model.provider "nvidia"
+          hermes config set model.default "moonshotai/kimi-k2.6"
           hermes config set web.search_backend searxng
           hermes config set tts.provider edge
           hermes config set toolsets '["terminal","files","web","browser","code","vision","tts","memory","skills","delegation","cron"]'
@@ -227,7 +154,7 @@ jobs:
           TG_API="https://api.telegram.org"
           curl -s -X POST "${TG_API}/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_USER_ID}" \
-            -d text="🟢 Hermes Agent ONLINE — custom endpoint mode (proxy tested OK)" > /dev/null
+            -d text="🟢 Hermes Agent ONLINE — direct NVIDIA mode (manual model selection)" > /dev/null
 
       # ── 9. Run gateway with time budget ──
       - name: Run Hermes gateway

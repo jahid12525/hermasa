@@ -8,8 +8,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  HERMES_MODEL: "nvidia/smart"
-  RUN_MINUTES: 350
+  RUN_MINUTES: 330
   HERMES_HOME: /home/runner/.hermes
   DATA_REPO: jahid12525/harmesprivatestorage
 
@@ -30,7 +29,6 @@ jobs:
           if [ -d /tmp/data ]; then
             rm -f /tmp/data/.env
             rsync -a --exclude='.git' /tmp/data/ "$HERMES_HOME/" || true
-            # reassemble chunked files
             find "$HERMES_HOME" -name "*.gh-chunk.000" | while read -r first; do
               base="${first%.gh-chunk.000}"
               cat "${base}".gh-chunk.* > "$base"
@@ -84,7 +82,7 @@ jobs:
           sleep 20
           echo "Camoufox launched"
 
-      # ── 4.5. Start LiteLLM failover proxy (multi-model auto-switch) ──
+      # ── 4.5. Start LiteLLM failover proxy + END-TO-END TEST ──
       - name: Start LiteLLM failover proxy
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
@@ -152,18 +150,29 @@ jobs:
           fi
           echo "✅ LiteLLM proxy up — available models:"
           curl -s http://localhost:4000/v1/models
+          echo ""
+          echo "🧪 Testing a REAL completion through proxy → NVIDIA..."
+          RESP=$(curl -s -X POST http://localhost:4000/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer sk-local-proxy" \
+            -d '{"model":"smart","messages":[{"role":"user","content":"Reply with exactly: OK"}],"max_tokens":10}')
+          echo "$RESP"
+          if ! echo "$RESP" | grep -q '"content"'; then
+            echo "❌ Proxy → NVIDIA completion FAILED — litellm log:"
+            tail -80 /tmp/litellm.log
+            exit 1
+          fi
+          echo "✅ End-to-end completion works"
 
-      # ── 5. Write .env ──
+      # ── 5. Write .env (NO NVIDIA_API_KEY — Hermes must not see it!) ──
       - name: Write .env
         env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           mkdir -p "$HERMES_HOME"
           cat > "$HERMES_HOME/.env" <<EOF
-          NVIDIA_API_KEY=${NVIDIA_API_KEY}
           TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
           TELEGRAM_ALLOWED_USERS=${TELEGRAM_USER_ID}
           SEARXNG_URL=http://localhost:8080
@@ -171,16 +180,23 @@ jobs:
           GROQ_API_KEY=${GROQ_API_KEY}
           EOF
 
-      # ── 6. Configure Hermes (built-in nvidia provider → local proxy) ──
+      # ── 6. Configure Hermes (official custom-endpoint pattern) ──
       - name: Configure Hermes
         run: |
-          hermes config set providers.nvidia.base_url "http://localhost:4000/v1"
-          hermes config set providers.nvidia.api_key_env NVIDIA_API_KEY
-          hermes config set model "$HERMES_MODEL"
+          hermes config unset providers.nvidia.base_url || true
+          hermes config unset providers.nvidia.api_key_env || true
+          hermes config unset providers.nim.base_url || true
+          hermes config unset providers.nim.api_key_env || true
+          hermes config set model.default "smart"
+          hermes config set model.provider "custom"
+          hermes config set model.base_url "http://localhost:4000/v1"
+          hermes config set model.api_key "sk-local-proxy"
           hermes config set web.search_backend searxng
           hermes config set tts.provider edge
           hermes config set toolsets '["terminal","files","web","browser","code","vision","tts","memory","skills","delegation","cron"]'
           hermes doctor || true
+          echo "── Final model config ──"
+          hermes config get model || true
 
       # ── 7. Background backup loop (every 30 min → backup branch) ──
       - name: Start backup loop
@@ -214,9 +230,9 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
         run: |
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+          curl -s -X POST "{{https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}}}/sendMessage" \
             -d chat_id="${TELEGRAM_USER_ID}" \
-            -d text="🟢 Hermes Agent is ONLINE — NVIDIA multi-model failover active (proxy mode)" > /dev/null
+            -d text="🟢 Hermes Agent ONLINE — custom endpoint mode (proxy tested OK)" > /dev/null
 
       # ── 9. Run gateway with time budget ──
       - name: Run Hermes gateway
@@ -264,6 +280,6 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
         run: |
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+          curl -s -X POST "{{https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}}}/sendMessage" \
             -d chat_id="${TELEGRAM_USER_ID}" \
             -d text="🔴 Hermes Agent run FAILED — check Actions logs" > /dev/null

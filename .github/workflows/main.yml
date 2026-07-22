@@ -88,45 +88,36 @@ jobs:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
         run: |
           pip install -U "litellm[proxy]"
-          cat > /tmp/litellm.yaml <<'EOF'
-          model_list:
-            - model_name: smart
-              litellm_params:
-                model: openai/z-ai/glm-5.2
-                api_base: https://integrate.api.nvidia.com/v1
-                api_key: os.environ/NVIDIA_API_KEY
-            - model_name: smart
-              litellm_params:
-                model: openai/deepseek-ai/deepseek-v4-flash
-                api_base: https://integrate.api.nvidia.com/v1
-                api_key: os.environ/NVIDIA_API_KEY
-            - model_name: smart
-              litellm_params:
-                model: openai/moonshotai/kimi-k2.6
-                api_base: https://integrate.api.nvidia.com/v1
-                api_key: os.environ/NVIDIA_API_KEY
-            - model_name: smart
-              litellm_params:
-                model: openai/nvidia/nemotron-3-super-120b-a12b
-                api_base: https://integrate.api.nvidia.com/v1
-                api_key: os.environ/NVIDIA_API_KEY
-            - model_name: smart
-              litellm_params:
-                model: openai/nvidia/nemotron-3-nano-30b-a3b
-                api_base: https://integrate.api.nvidia.com/v1
-                api_key: os.environ/NVIDIA_API_KEY
-            - model_name: smart
-              litellm_params:
-                model: openai/deepseek-ai/deepseek-v4-pro
-                api_base: https://integrate.api.nvidia.com/v1
-                api_key: os.environ/NVIDIA_API_KEY
-            - model_name: smart
-              litellm_params:
-                model: openai/nvidia/nemotron-3-ultra-550b-a55b
-                api_base: https://integrate.api.nvidia.com/v1
-                api_key: os.environ/NVIDIA_API_KEY
+          echo "Fetching this account's REAL model catalog from NVIDIA..."
+          HTTP=$(curl -s -o /tmp/nvidia_models.json -w "%{http_code}" https://integrate.api.nvidia.com/v1/models -H "Authorization: Bearer ${NVIDIA_API_KEY}")
+          if [ "$HTTP" != "200" ]; then
+            echo "Could not fetch NVIDIA model list (HTTP $HTTP):"
+            cat /tmp/nvidia_models.json
+            exit 1
+          fi
+          jq -r '.data[].id' /tmp/nvidia_models.json > /tmp/nvidia_ids.txt
+          echo "Account catalog has $(wc -l < /tmp/nvidia_ids.txt) models"
+          CANDIDATES="z-ai/glm-5.2 deepseek-ai/deepseek-v4-flash moonshotai/kimi-k2.6 nvidia/nemotron-3-super-120b-a12b nvidia/nemotron-3-nano-30b-a3b deepseek-ai/deepseek-v4-pro nvidia/nemotron-3-ultra-550b-a55b"
+          echo "model_list:" > /tmp/litellm.yaml
+          FOUND=0
+          for M in $CANDIDATES; do
+            if grep -qxF "$M" /tmp/nvidia_ids.txt; then
+              echo "  USING: $M"
+              printf '  - model_name: smart\n    litellm_params:\n      model: openai/%s\n      api_base: https://integrate.api.nvidia.com/v1\n      api_key: os.environ/NVIDIA_API_KEY\n' "$M" >> /tmp/litellm.yaml
+              FOUND=$((FOUND+1))
+            else
+              echo "  SKIPPING (not in this account's catalog): $M"
+            fi
+          done
+          if [ "$FOUND" -eq 0 ]; then
+            echo "NONE of the candidate models exist for this account. Full catalog below - pick chat models from here:"
+            cat /tmp/nvidia_ids.txt
+            exit 1
+          fi
+          echo "$FOUND verified models added to failover pool"
+          cat >> /tmp/litellm.yaml <<'EOF'
           litellm_settings:
-            num_retries: 1
+            num_retries: 3
             request_timeout: 300
           router_settings:
             allowed_fails: 2
@@ -135,6 +126,8 @@ jobs:
               nvidia/smart: smart
               nim/smart: smart
           EOF
+          echo "--- Final litellm config ---"
+          cat /tmp/litellm.yaml
           nohup litellm --config /tmp/litellm.yaml --port 4000 > /tmp/litellm.log 2>&1 &
           UP=0
           for i in $(seq 1 30); do

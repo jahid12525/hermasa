@@ -650,8 +650,7 @@ jobs:
           hermes config set model.default "$FIRST_MODEL"
           echo "Default model enforced: $FIRST_MODEL"
           hermes config set web.search_backend searxng
-          hermes config set tts.provider edge
-          hermes config set toolsets '["terminal","files","web","browser","code","vision","tts","memory","skills","delegation","cron"]'
+          hermes config set toolsets '["terminal","files","web","browser","code","vision","memory","skills","delegation","cron"]'
           hermes doctor || true
           echo "── Final model config ──"
           hermes config get model || true

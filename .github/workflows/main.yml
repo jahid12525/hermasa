@@ -3,49 +3,18 @@ name: Hermes Agent — Telegram + NVIDIA + AgentRouter (all tools)
 on:
   workflow_dispatch:
     inputs:
-      # ── NVIDIA model families (tick = include in rotation) ──
-      nvidia_kimi:
-        description: "NVIDIA: Kimi (moonshotai)"
-        type: boolean
-        default: true
-      nvidia_deepseek:
-        description: "NVIDIA: DeepSeek"
-        type: boolean
-        default: true
-      nvidia_qwen:
-        description: "NVIDIA: Qwen"
-        type: boolean
-        default: true
-      nvidia_llama:
-        description: "NVIDIA: Llama + Nemotron"
-        type: boolean
-        default: true
-      nvidia_other:
-        description: "NVIDIA: everything else in catalog"
-        type: boolean
-        default: false
-      # ── AgentRouter models (tick = include in rotation) ──
-      ar_gpt:
-        description: "AgentRouter: gpt-5.5"
-        type: boolean
-        default: true
-      ar_glm:
-        description: "AgentRouter: glm-5.2"
-        type: boolean
-        default: true
-      ar_claude:
-        description: "AgentRouter: Claude Opus 4-6/4-7/4-8 (Anthropic API)"
-        type: boolean
-        default: true
-      # ── Tuning ──
-      priority_models:
-        description: "Models to try FIRST (comma-separated, optional)"
+      nvidia_models:
+        description: "NVIDIA models (comma-separated, priority order; empty = skip NVIDIA)"
         required: false
-        default: "moonshotai/kimi-k2.6,deepseek-ai/deepseek-v3.1"
-      max_models:
-        description: "Max models per provider"
+        default: "moonshotai/kimi-k2.6,deepseek-ai/deepseek-v3.1,qwen/qwen3-coder-480b-a35b-instruct,meta/llama-3.3-70b-instruct,nvidia/llama-3.1-nemotron-70b-instruct"
+      agentrouter_models:
+        description: "AgentRouter OpenAI models (comma-separated; empty = skip)"
         required: false
-        default: "12"
+        default: "gpt-5.5,glm-5.2"
+      agentrouter_claude_models:
+        description: "AgentRouter Claude models (comma-separated, Anthropic API; empty = skip)"
+        required: false
+        default: "claude-opus-4-8,claude-opus-4-7,claude-opus-4-6"
 
 concurrency:
   group: hermes-agent
@@ -55,6 +24,9 @@ env:
   RUN_MINUTES: 330
   HERMES_HOME: /home/runner/.hermes
   DATA_REPO: jahid12525/harmesprivatestorage
+  NVIDIA_MODELS: ${{ inputs.nvidia_models }}
+  AGENTROUTER_MODELS: ${{ inputs.agentrouter_models }}
+  AGENTROUTER_CLAUDE_MODELS: ${{ inputs.agentrouter_claude_models }}
 
 jobs:
   run-agent:
@@ -145,103 +117,6 @@ jobs:
           GROQ_API_KEY=${GROQ_API_KEY}
           AGENTROUTER_API_KEY=${AGENTROUTER_API_KEY}
           EOF
-
-      # ── 5.4 Auto-discover models from both providers, filtered by checkboxes ──
-      - name: Discover models
-        env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-          AGENTROUTER_API_KEY: ${{ secrets.AGENTROUTER_API_KEY }}
-          NV_KIMI: ${{ inputs.nvidia_kimi }}
-          NV_DEEPSEEK: ${{ inputs.nvidia_deepseek }}
-          NV_QWEN: ${{ inputs.nvidia_qwen }}
-          NV_LLAMA: ${{ inputs.nvidia_llama }}
-          NV_OTHER: ${{ inputs.nvidia_other }}
-          AR_GPT: ${{ inputs.ar_gpt }}
-          AR_GLM: ${{ inputs.ar_glm }}
-          AR_CLAUDE: ${{ inputs.ar_claude }}
-          PRIORITY: ${{ inputs.priority_models }}
-          MAX_MODELS: ${{ inputs.max_models }}
-        run: |
-          cat > /tmp/discover.py <<'PYEOF'
-          import json, os, re, urllib.request
-
-          def on(name):
-              return os.environ.get(name) == "true"
-
-          def fetch(base, key):
-              if not key:
-                  return []
-              req = urllib.request.Request(base + "/v1/models")
-              req.add_header("Authorization", "Bearer " + key)
-              try:
-                  data = json.load(urllib.request.urlopen(req, timeout=30))
-                  return [m["id"] for m in data.get("data", []) if m.get("id")]
-              except Exception as e:
-                  print("!! discovery failed for", base, "->", e)
-                  return []
-
-          cap = int(os.environ.get("MAX_MODELS") or 12)
-          priority = [m.strip() for m in os.environ.get("PRIORITY", "").split(",") if m.strip()]
-
-          def order_and_cap(models):
-              ordered = [m for m in priority if m in models]
-              ordered += [m for m in models if m not in ordered]
-              return ordered[:cap]
-
-          # ── NVIDIA: family checkboxes ──
-          FAMILIES = [
-              ("NV_KIMI",     re.compile(r"kimi|moonshot", re.I)),
-              ("NV_DEEPSEEK", re.compile(r"deepseek", re.I)),
-              ("NV_QWEN",     re.compile(r"qwen", re.I)),
-              ("NV_LLAMA",    re.compile(r"llama|nemotron", re.I)),
-          ]
-          nv = []
-          if any(on(k) for k, _ in FAMILIES) or on("NV_OTHER"):
-              catalog = fetch("https://integrate.api.nvidia.com", os.environ.get("NVIDIA_API_KEY", ""))
-              picked = []
-              matched_any = set()
-              for key, rx in FAMILIES:
-                  hits = [m for m in catalog if rx.search(m)]
-                  matched_any.update(hits)
-                  if on(key):
-                      picked += hits
-              if on("NV_OTHER"):
-                  picked += [m for m in catalog if m not in matched_any]
-              seen = set()
-              nv = order_and_cap([m for m in picked if not (m in seen or seen.add(m))])
-
-          # ── AgentRouter: per-model checkboxes ──
-          ar_oai = []
-          ar_claude = []
-          if on("AR_GPT") or on("AR_GLM") or on("AR_CLAUDE"):
-              ar_all = fetch("https://agentrouter.org", os.environ.get("AGENTROUTER_API_KEY", ""))
-              if not ar_all:
-                  # catalog endpoint missing -> known account models
-                  ar_all = ["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "gpt-5.5", "glm-5.2"]
-              claude = [m for m in ar_all if "claude" in m.lower()]
-              gpt = [m for m in ar_all if "gpt" in m.lower()]
-              glm = [m for m in ar_all if "glm" in m.lower()]
-              if on("AR_GPT"):
-                  ar_oai += gpt
-              if on("AR_GLM"):
-                  ar_oai += glm
-              ar_oai = ar_oai[:cap]
-              if on("AR_CLAUDE"):
-                  ar_claude = sorted(claude, reverse=True)[:cap]  # 4-8 first, then 4-7, 4-6
-
-          print("NVIDIA pool:      ", nv)
-          print("AgentRouter pool: ", ar_oai)
-          print("Claude pool:      ", ar_claude)
-
-          if not (nv or ar_oai or ar_claude):
-              raise SystemExit("No models selected/discovered — tick at least one checkbox")
-
-          with open(os.environ["GITHUB_ENV"], "a") as f:
-              f.write("NVIDIA_MODELS=" + ",".join(nv) + "\n")
-              f.write("AGENTROUTER_MODELS=" + ",".join(ar_oai) + "\n")
-              f.write("AGENTROUTER_CLAUDE_MODELS=" + ",".join(ar_claude) + "\n")
-          PYEOF
-          python3 /tmp/discover.py
 
       # ── 5.5 Start multi-provider rotation proxy (pure stdlib, no 3rd-party) ──
       # NVIDIA (OpenAI-compat) + AgentRouter (OpenAI-compat) + AgentRouter Claude
@@ -600,8 +475,7 @@ jobs:
 
           if __name__ == "__main__":
               if not MODELS:
-                  MODELS.append("moonshotai/kimi-k2.6")
-                  PROVIDERS["moonshotai/kimi-k2.6"] = (NV_UPSTREAM, NV_KEY, "nvidia", "openai")
+                  raise SystemExit("No models configured — fill at least one model input field")
               print("[rotator] rotation pool:",
                     [(m, PROVIDERS[m][2], PROVIDERS[m][3]) for m in MODELS], flush=True)
               ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
@@ -622,7 +496,7 @@ jobs:
           # Route ALL model traffic through the local rotator proxy:
           hermes config set model.base_url "http://127.0.0.1:8765/v1" || true
           hermes config set providers.nvidia.base_url "http://127.0.0.1:8765/v1" || true
-          # Default model = first discovered model across all pools:
+          # Default model = first model across all input lists:
           FIRST_MODEL="$(echo "$NVIDIA_MODELS,$AGENTROUTER_MODELS,$AGENTROUTER_CLAUDE_MODELS" | tr ',' '\n' | grep -v '^$' | head -1)"
           hermes config set model.default "$FIRST_MODEL"
           hermes config set web.search_backend searxng

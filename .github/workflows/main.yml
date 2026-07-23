@@ -185,6 +185,36 @@ jobs:
               with _lock:
                   _cooldown_until[m] = time.time() + seconds
 
+          def validate_models():
+              """Check the configured ids against NVIDIA's real model list.
+              Drops invalid ids (with Telegram notice + closest-match hints)."""
+              global MODELS
+              try:
+                  req = urllib.request.Request(UPSTREAM + "/v1/models")
+                  req.add_header("Authorization", "Bearer " + API_KEY)
+                  data = json.load(urllib.request.urlopen(req, timeout=30))
+                  upstream = set()
+                  for m in data.get("data", []):
+                      if isinstance(m, dict) and m.get("id"):
+                          upstream.add(m["id"])
+              except Exception as e:
+                  print("[rotator] could not fetch upstream model list (%s); keeping pool as-is" % e, flush=True)
+                  return
+              if not upstream:
+                  return
+              import difflib
+              good = [m for m in MODELS if m in upstream]
+              bad  = [m for m in MODELS if m not in upstream]
+              for b in bad:
+                  close = difflib.get_close_matches(b, upstream, n=3, cutoff=0.3)
+                  print("[rotator] INVALID id '%s' \u2014 closest real ids: %s" % (b, close), flush=True)
+              if bad:
+                  tg_send("\u26a0\ufe0f These NVIDIA model ids don't exist and were removed from the pool: %s" % ", ".join(bad))
+              if not good:
+                  tg_send("\ud83d\udd34 NONE of the configured NVIDIA model ids exist \u2014 fix the nvidia_models input field.")
+                  raise SystemExit("No valid models: %s" % MODELS)
+              MODELS = good
+
           class Handler(BaseHTTPRequestHandler):
               def log_message(self, fmt, *args):
                   print("[rotator]", fmt % args, flush=True)
@@ -244,6 +274,9 @@ jobs:
                       if not avail:
                           with _lock:
                               soonest = min(_cooldown_until.get(m, 0) for m in order)
+                          if soonest > time.time() + 86400:
+                              self._send(502, b'{"error":"no usable models: all ids invalid or dead"}')
+                              return
                           wait = max(5, min(soonest - time.time(), COOLDOWN))
                           tg_send("\u23f3 All NVIDIA models hit rate limits. "
                                   "Waiting for cooldown \u2014 your task will continue automatically, nothing is lost.")
@@ -269,6 +302,17 @@ jobs:
                       try:
                           resp = urllib.request.urlopen(req, timeout=900)
                       except urllib.error.HTTPError as e:
+                          if e.code == 404:
+                              mark_limited(model, 10**9)   # dead id: never retry
+                              nxt = [m for m in order if usable(m)]
+                              if nxt:
+                                  tg_send("\u26a0\ufe0f Model '%s' not found on NVIDIA API (404) \u2014 switching to '%s'."
+                                          % (model, nxt[0]))
+                              print("[rotator] %s -> HTTP 404, marked dead" % model, flush=True)
+                              if not nxt:
+                                  self._send(502, b'{"error":"all configured models invalid (404)"}')
+                                  return
+                              continue
                           if e.code in ROTATE_ON:
                               retry = COOLDOWN
                               ra = e.headers.get("Retry-After") if e.headers else None
@@ -320,7 +364,9 @@ jobs:
           if __name__ == "__main__":
               if not MODELS:
                   raise SystemExit("No models configured — fill the nvidia_models input field")
-              print("[rotator] rotation pool:", MODELS, flush=True)
+              print("[rotator] configured pool:", MODELS, flush=True)
+              validate_models()
+              print("[rotator] validated pool:", MODELS, flush=True)
               ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
           PYEOF
 
@@ -336,6 +382,23 @@ jobs:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
         run: |
           M="$(echo "$NVIDIA_MODELS" | cut -d',' -f1)"
+          echo "── Model id check against NVIDIA API ──"
+          curl -sS --max-time 60 https://integrate.api.nvidia.com/v1/models \
+            -H "Authorization: Bearer ${NVIDIA_API_KEY}" -o /tmp/nv_models.json -w "HTTP %{http_code}\n" || true
+          python3 - <<'PY' || true
+          import difflib, json, os
+          try:
+              ids = [m["id"] for m in json.load(open("/tmp/nv_models.json")).get("data", [])]
+          except Exception as e:
+              ids = []
+              print("could not parse model list:", e)
+          want = [w.strip() for w in os.environ["NVIDIA_MODELS"].split(",") if w.strip()]
+          for w in want:
+              if w in ids:
+                  print("OK    " + w)
+              elif ids:
+                  print("WRONG " + w + "  -> did you mean: " + ", ".join(difflib.get_close_matches(w, ids, n=3, cutoff=0.3)))
+          PY
           echo "── Direct NVIDIA ($M) ──"
           curl -sS -o /tmp/nv_direct.json -w "HTTP %{http_code}\n" --max-time 120 \
             https://integrate.api.nvidia.com/v1/chat/completions \
@@ -343,11 +406,12 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"model\":\"$M\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the word OK\"}],\"max_tokens\":16}" || true
           head -c 400 /tmp/nv_direct.json; echo
-          echo "── Through rotator proxy ($M) ──"
+          MV="$(curl -s http://127.0.0.1:8765/v1/models | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; print(d[0]["id"] if d else "")')"
+          echo "── Through rotator proxy (first VALID model: $MV) ──"
           curl -sS -o /tmp/rot_test.json -w "HTTP %{http_code}\n" --max-time 180 \
             http://127.0.0.1:8765/v1/chat/completions \
             -H "Content-Type: application/json" \
-            -d "{\"model\":\"$M\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the word OK\"}],\"max_tokens\":16}" || true
+            -d "{\"model\":\"$MV\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the word OK\"}],\"max_tokens\":16}" || true
           head -c 400 /tmp/rot_test.json; echo
           echo "── Rotator log ──"
           tail -50 /tmp/rotator.log || true
@@ -361,10 +425,10 @@ jobs:
           # Route ALL model traffic through the local rotator proxy:
           hermes config set model.base_url "http://127.0.0.1:8765/v1" || true
           hermes config set providers.nvidia.base_url "http://127.0.0.1:8765/v1" || true
-          # Default model = first model in the input list (NO built-in fallback):
-          FIRST_MODEL="$(echo "$NVIDIA_MODELS" | cut -d',' -f1)"
+          # Default model = first VALID model from the rotator's checked pool:
+          FIRST_MODEL="$(curl -s http://127.0.0.1:8765/v1/models | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; print(d[0]["id"] if d else "")')"
           if [ -z "$FIRST_MODEL" ]; then
-            echo "ERROR: nvidia_models input is empty — nothing to run"; exit 1
+            echo "ERROR: no valid model available — check the nvidia_models input"; exit 1
           fi
           # Clear any model choice persisted in the data repo from previous runs:
           hermes config unset model.default || true

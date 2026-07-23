@@ -102,7 +102,6 @@ jobs:
               - html
               - json
           EOF
-          sed -i 's/^          //' /tmp/searxng/settings.yml
           docker run -d --name searxng -p 8080:8080 \
             -v /tmp/searxng:/etc/searxng \
             searxng/searxng:latest
@@ -146,7 +145,6 @@ jobs:
           GROQ_API_KEY=${GROQ_API_KEY}
           AGENTROUTER_API_KEY=${AGENTROUTER_API_KEY}
           EOF
-          sed -i 's/^          //' "$HERMES_HOME/.env"
 
       # ── 5.4 Auto-discover models from both providers, filtered by checkboxes ──
       - name: Discover models
@@ -200,7 +198,8 @@ jobs:
           nv = []
           if any(on(k) for k, _ in FAMILIES) or on("NV_OTHER"):
               catalog = fetch("https://integrate.api.nvidia.com", os.environ.get("NVIDIA_API_KEY", ""))
-              picked, matched_any = [], set()
+              picked = []
+              matched_any = set()
               for key, rx in FAMILIES:
                   hits = [m for m in catalog if rx.search(m)]
                   matched_any.update(hits)
@@ -212,15 +211,16 @@ jobs:
               nv = order_and_cap([m for m in picked if not (m in seen or seen.add(m))])
 
           # ── AgentRouter: per-model checkboxes ──
-          ar_oai, ar_claude = [], []
+          ar_oai = []
+          ar_claude = []
           if on("AR_GPT") or on("AR_GLM") or on("AR_CLAUDE"):
               ar_all = fetch("https://agentrouter.org", os.environ.get("AGENTROUTER_API_KEY", ""))
               if not ar_all:
                   # catalog endpoint missing -> known account models
                   ar_all = ["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "gpt-5.5", "glm-5.2"]
               claude = [m for m in ar_all if "claude" in m.lower()]
-              gpt    = [m for m in ar_all if "gpt" in m.lower()]
-              glm    = [m for m in ar_all if "glm" in m.lower()]
+              gpt = [m for m in ar_all if "gpt" in m.lower()]
+              glm = [m for m in ar_all if "glm" in m.lower()]
               if on("AR_GPT"):
                   ar_oai += gpt
               if on("AR_GLM"):
@@ -241,7 +241,6 @@ jobs:
               f.write("AGENTROUTER_MODELS=" + ",".join(ar_oai) + "\n")
               f.write("AGENTROUTER_CLAUDE_MODELS=" + ",".join(ar_claude) + "\n")
           PYEOF
-          sed -i 's/^          //' /tmp/discover.py
           python3 /tmp/discover.py
 
       # ── 5.5 Start multi-provider rotation proxy (pure stdlib, no 3rd-party) ──
@@ -329,7 +328,8 @@ jobs:
 
           # ── OpenAI -> Anthropic Messages request translation ──
           def oa_to_anthropic(p, model):
-              system_parts, msgs = [], []
+              system_parts = []
+              msgs = []
               for m in p.get("messages", []):
                   role = m.get("role")
                   content = m.get("content")
@@ -394,7 +394,8 @@ jobs:
 
           # ── Anthropic response -> OpenAI chat.completion translation ──
           def anthropic_to_oa(r):
-              text, tool_calls = "", []
+              text = ""
+              tool_calls = []
               for blk in r.get("content") or []:
                   if blk.get("type") == "text":
                       text += blk.get("text", "")
@@ -409,7 +410,8 @@ jobs:
               if tool_calls:
                   msg["tool_calls"] = tool_calls
               usage = r.get("usage") or {}
-              pt, ct = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
+              pt = usage.get("input_tokens", 0)
+              ct = usage.get("output_tokens", 0)
               return {"id": r.get("id") or "chatcmpl-anthropic",
                       "object": "chat.completion",
                       "created": int(time.time()),
@@ -488,11 +490,11 @@ jobs:
                           with _lock:
                               soonest = min(_cooldown_until.get(m, 0) for m in order)
                           wait = max(5, min(soonest - time.time(), COOLDOWN))
-                          tg_send("⏳ All models (NVIDIA + AgentRouter) hit rate limits. "
-                                  "Waiting for cooldown — your task will continue automatically, nothing is lost.")
+                          tg_send("\u23f3 All models (NVIDIA + AgentRouter) hit rate limits. "
+                                  "Waiting for cooldown \u2014 your task will continue automatically, nothing is lost.")
                           print("[rotator] all models cooling, sleeping %ds" % wait, flush=True)
                           time.sleep(wait)
-                          tg_send("✅ Cooldown finished — resuming your task now.")
+                          tg_send("\u2705 Cooldown finished \u2014 resuming your task now.")
                           continue
 
                       model = avail[0]
@@ -533,8 +535,8 @@ jobs:
                               mark_limited(model, retry)
                               nxt = [m for m in order if usable(m)]
                               if nxt:
-                                  tg_send("⚠️ Model '%s' rate-limited (HTTP %d). "
-                                          "Switching to '%s' — task continues."
+                                  tg_send("\u26a0\ufe0f Model '%s' rate-limited (HTTP %d). "
+                                          "Switching to '%s' \u2014 task continues."
                                           % (model, e.code, nxt[0]))
                               print("[rotator] %s -> HTTP %d, cooling %ds" % (model, e.code, retry), flush=True)
                               continue                       # retry same request on next model
@@ -604,7 +606,6 @@ jobs:
                     [(m, PROVIDERS[m][2], PROVIDERS[m][3]) for m in MODELS], flush=True)
               ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
           PYEOF
-          sed -i 's/^          //' /tmp/rotator.py
 
           nohup python3 /tmp/rotator.py > /tmp/rotator.log 2>&1 &
           sleep 2
@@ -654,7 +655,6 @@ jobs:
             echo "Backup pushed at $(date)"
           done
           EOF
-          sed -i 's/^          //' /tmp/sync.sh
           chmod +x /tmp/sync.sh
           HERMES_HOME="$HERMES_HOME" DATA_REPO="$DATA_REPO" DATA_REPO_TOKEN="$DATA_REPO_TOKEN" nohup /tmp/sync.sh > /tmp/sync.log 2>&1 &
 
@@ -703,7 +703,6 @@ jobs:
           .env
           *.log
           EOF
-          sed -i 's/^          //' .gitignore
           git init -q -b main
           git config user.email "bot@hermes" && git config user.name "hermes-bot"
           git add -A && git commit -q -m "final save $(date -u +%FT%TZ)" || true

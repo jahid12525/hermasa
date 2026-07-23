@@ -6,7 +6,7 @@ on:
       nvidia_models:
         description: "NVIDIA models (comma-separated, priority order; empty = skip NVIDIA)"
         required: false
-        default: ""
+        default: "moonshotai/kimi-k2.6,deepseek-ai/deepseek-v3.1,qwen/qwen3-coder-480b-a35b-instruct,meta/llama-3.3-70b-instruct,nvidia/llama-3.1-nemotron-70b-instruct"
       agentrouter_models:
         description: "AgentRouter OpenAI models (comma-separated; empty = skip)"
         required: false
@@ -332,6 +332,79 @@ jobs:
                   except (BrokenPipeError, ConnectionResetError):
                       pass
 
+              def _stream_anthropic(self, resp, model):
+                  """Translate a live Anthropic SSE stream into an OpenAI SSE stream."""
+                  self.send_response(200)
+                  self.send_header("Content-Type", "text/event-stream")
+                  self.send_header("Cache-Control", "no-cache")
+                  self.send_header("X-Rotator-Model", model)
+                  self.end_headers()
+                  base = {"id": "chatcmpl-%d" % int(time.time()),
+                          "object": "chat.completion.chunk",
+                          "created": int(time.time()), "model": model}
+                  def emit(delta=None, finish=None, usage=None):
+                      c = dict(base, choices=[{"index": 0, "delta": delta or {},
+                                               "finish_reason": finish}])
+                      if usage:
+                          c["usage"] = usage
+                      self.wfile.write(b"data: " + json.dumps(c).encode() + b"\n\n")
+                      self.wfile.flush()
+                  finish = "stop"
+                  usage = None
+                  tool_idx = -1
+                  try:
+                      emit({"role": "assistant"})   # first byte goes out immediately
+                      for raw_line in resp:
+                          line = raw_line.decode("utf-8", "replace").strip()
+                          if not line.startswith("data:"):
+                              continue
+                          data = line[5:].strip()
+                          if not data:
+                              continue
+                          try:
+                              ev = json.loads(data)
+                          except Exception:
+                              continue
+                          t = ev.get("type")
+                          if t == "content_block_start":
+                              blk = ev.get("content_block") or {}
+                              if blk.get("type") == "tool_use":
+                                  tool_idx += 1
+                                  emit({"tool_calls": [{"index": tool_idx,
+                                                        "id": blk.get("id") or "",
+                                                        "type": "function",
+                                                        "function": {"name": blk.get("name") or "",
+                                                                     "arguments": ""}}]})
+                          elif t == "content_block_delta":
+                              d = ev.get("delta") or {}
+                              if d.get("type") == "text_delta":
+                                  emit({"content": d.get("text", "")})
+                              elif d.get("type") == "input_json_delta":
+                                  emit({"tool_calls": [{"index": max(tool_idx, 0),
+                                                        "function": {"arguments": d.get("partial_json", "")}}]})
+                          elif t == "message_delta":
+                              sr = (ev.get("delta") or {}).get("stop_reason")
+                              if sr:
+                                  finish = {"end_turn": "stop", "max_tokens": "length",
+                                            "tool_use": "tool_calls",
+                                            "stop_sequence": "stop"}.get(sr, "stop")
+                              u = ev.get("usage") or {}
+                              if u:
+                                  pt = u.get("input_tokens", 0)
+                                  ct = u.get("output_tokens", 0)
+                                  usage = {"prompt_tokens": pt, "completion_tokens": ct,
+                                           "total_tokens": pt + ct}
+                          elif t == "message_stop":
+                              break
+                          elif t == "error":
+                              print("[rotator] anthropic stream error: %s" % data, flush=True)
+                              break
+                      emit(finish=finish, usage=usage)
+                      self.wfile.write(b"data: [DONE]\n\n")
+                      self.wfile.flush()
+                  except (BrokenPipeError, ConnectionResetError):
+                      pass
+
               def do_GET(self):
                   if self.path.rstrip("/").endswith("/models"):
                       body = json.dumps({"object": "list", "data": [
@@ -339,12 +412,25 @@ jobs:
                       ]}).encode()
                       self._send(200, body)
                       return
-                  self._proxy(None)
+                  self._safe_proxy(None)
 
               def do_POST(self):
                   length = int(self.headers.get("Content-Length") or 0)
                   raw = self.rfile.read(length) if length else b""
-                  self._proxy(raw)
+                  self._safe_proxy(raw)
+
+              def _safe_proxy(self, raw):
+                  try:
+                      self._proxy(raw)
+                  except (BrokenPipeError, ConnectionResetError):
+                      pass
+                  except Exception:
+                      import traceback
+                      print("[rotator] handler crash:\n" + traceback.format_exc(), flush=True)
+                      try:
+                          self._send(502, b'{"error":"rotator internal error"}')
+                      except Exception:
+                          pass
 
               def _proxy(self, raw):
                   payload = None
@@ -382,12 +468,16 @@ jobs:
 
                       if anthropic_mode:
                           a_body = oa_to_anthropic(payload, model)
+                          if payload.get("stream"):
+                              a_body["stream"] = True   # stream from upstream, relay tokens live
                           body = json.dumps(a_body).encode("utf-8")
                           req = urllib.request.Request(upstream + "/v1/messages",
                                                        data=body, method="POST")
                           req.add_header("x-api-key", key)
+                          req.add_header("Authorization", "Bearer " + key)  # some routers want Bearer here
                           req.add_header("anthropic-version", "2023-06-01")
                           req.add_header("Content-Type", "application/json")
+                          req.add_header("Accept", "text/event-stream" if a_body.get("stream") else "application/json")
                       else:
                           if isinstance(payload, dict) and "model" in payload:
                               payload["model"] = model
@@ -422,6 +512,8 @@ jobs:
                               err = e.read()
                           except Exception:
                               err = b'{"error":"upstream error"}'
+                          print("[rotator] %s -> HTTP %d (not rotating): %s"
+                                % (model, e.code, err[:300]), flush=True)
                           self._send(e.code, err)
                           return
                       except Exception as e:
@@ -431,6 +523,16 @@ jobs:
 
                       # ── Success: Anthropic -> translate back to OpenAI format ──
                       if anthropic_mode:
+                          print("[rotator] %s -> HTTP %d via %s (anthropic)" % (self.path, resp.status, model), flush=True)
+                          if payload.get("stream"):
+                              try:
+                                  self._stream_anthropic(resp, model)
+                              finally:
+                                  try:
+                                      resp.close()
+                                  except Exception:
+                                      pass
+                              return
                           try:
                               data = json.loads(resp.read().decode("utf-8"))
                           except Exception:
@@ -456,6 +558,7 @@ jobs:
                           return
 
                       # ── Success: OpenAI-compatible stream passthrough (SSE-safe) ──
+                      print("[rotator] %s -> HTTP %d via %s (%s)" % (self.path, resp.status, model, owner), flush=True)
                       self.send_response(resp.status)
                       self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
                       self.send_header("X-Rotator-Model", model)
@@ -489,6 +592,43 @@ jobs:
           curl -sf http://127.0.0.1:8765/v1/models > /dev/null \
             && echo "Rotator proxy is up on :8765" \
             || (cat /tmp/rotator.log; exit 1)
+
+      # ── 5.6 Smoke test: verify AgentRouter key + models actually answer ──
+      - name: Smoke test providers
+        env:
+          AGENTROUTER_API_KEY: ${{ secrets.AGENTROUTER_API_KEY }}
+        run: |
+          if [ -n "$AGENTROUTER_MODELS" ]; then
+            M="$(echo "$AGENTROUTER_MODELS" | cut -d',' -f1)"
+            echo "── Direct AgentRouter OpenAI ($M) ──"
+            curl -sS -o /tmp/ar_oai.json -w "HTTP %{http_code}\n" --max-time 120 \
+              https://agentrouter.org/v1/chat/completions \
+              -H "Authorization: Bearer ${AGENTROUTER_API_KEY}" \
+              -H "Content-Type: application/json" \
+              -d "{\"model\":\"$M\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the word OK\"}],\"max_tokens\":16}" || true
+            head -c 400 /tmp/ar_oai.json; echo
+          fi
+          if [ -n "$AGENTROUTER_CLAUDE_MODELS" ]; then
+            M="$(echo "$AGENTROUTER_CLAUDE_MODELS" | cut -d',' -f1)"
+            echo "── Direct AgentRouter Claude ($M, Anthropic API) ──"
+            curl -sS -o /tmp/ar_claude.json -w "HTTP %{http_code}\n" --max-time 120 \
+              https://agentrouter.org/v1/messages \
+              -H "x-api-key: ${AGENTROUTER_API_KEY}" \
+              -H "Authorization: Bearer ${AGENTROUTER_API_KEY}" \
+              -H "anthropic-version: 2023-06-01" \
+              -H "Content-Type: application/json" \
+              -d "{\"model\":\"$M\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the word OK\"}]}" || true
+            head -c 400 /tmp/ar_claude.json; echo
+          fi
+          FIRST="$(echo "$NVIDIA_MODELS,$AGENTROUTER_MODELS,$AGENTROUTER_CLAUDE_MODELS" | tr ',' '\n' | grep -v '^$' | head -1)"
+          echo "── Through rotator proxy ($FIRST) ──"
+          curl -sS -o /tmp/rot_test.json -w "HTTP %{http_code}\n" --max-time 180 \
+            http://127.0.0.1:8765/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -d "{\"model\":\"$FIRST\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the word OK\"}],\"max_tokens\":16}" || true
+          head -c 400 /tmp/rot_test.json; echo
+          echo "── Rotator log ──"
+          tail -50 /tmp/rotator.log || true
 
       # ── 6. Configure Hermes (all traffic via rotation proxy) ──
       - name: Configure Hermes
@@ -569,6 +709,11 @@ jobs:
             echo "Gateway exited, restarting in 10s..."
             sleep 10
           done
+
+      # ── 9.5 Dump rotator log (shows every upstream call + errors) ──
+      - name: Dump rotator log
+        if: always()
+        run: tail -200 /tmp/rotator.log || true
 
       # ── 10. Final push to data repo (main) ──
       - name: Final data push

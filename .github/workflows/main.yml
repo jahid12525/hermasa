@@ -6,7 +6,7 @@ on:
       nvidia_models:
         description: "NVIDIA models (comma-separated, priority order; empty = skip NVIDIA)"
         required: false
-        default: "moonshotai/kimi-k2.6,deepseek-ai/deepseek-v3.1,qwen/qwen3-coder-480b-a35b-instruct,meta/llama-3.3-70b-instruct,nvidia/llama-3.1-nemotron-70b-instruct"
+        default: ""
       agentrouter_models:
         description: "AgentRouter OpenAI models (comma-separated; empty = skip)"
         required: false
@@ -354,6 +354,10 @@ jobs:
                       except Exception:
                           payload = None
                   preferred = payload.get("model") if isinstance(payload, dict) else None
+                  if preferred and preferred not in PROVIDERS:
+                      # Stale/unknown model (e.g. restored old session) -> force pool model
+                      print("[rotator] requested model '%s' NOT in pool; overriding with '%s'"
+                            % (preferred, MODELS[0]), flush=True)
                   order = model_order(preferred)
                   is_chat = isinstance(payload, dict) and "messages" in payload
 
@@ -373,8 +377,7 @@ jobs:
                           continue
 
                       model = avail[0]
-                      upstream, key, owner, api = PROVIDERS.get(
-                          model, (NV_UPSTREAM, NV_KEY, "nvidia", "openai"))
+                      upstream, key, owner, api = PROVIDERS[model]  # pool models only, no fallback
                       anthropic_mode = (api == "anthropic" and is_chat)
 
                       if anthropic_mode:
@@ -496,9 +499,16 @@ jobs:
           # Route ALL model traffic through the local rotator proxy:
           hermes config set model.base_url "http://127.0.0.1:8765/v1" || true
           hermes config set providers.nvidia.base_url "http://127.0.0.1:8765/v1" || true
-          # Default model = first model across all input lists:
+          # Default model = first model across all input lists (NO built-in fallback):
           FIRST_MODEL="$(echo "$NVIDIA_MODELS,$AGENTROUTER_MODELS,$AGENTROUTER_CLAUDE_MODELS" | tr ',' '\n' | grep -v '^$' | head -1)"
+          if [ -z "$FIRST_MODEL" ]; then
+            echo "ERROR: all model input fields are empty — nothing to run"; exit 1
+          fi
+          # Clear any model choice persisted in the data repo from previous runs:
+          hermes config unset model.default || true
+          hermes config unset model.name || true
           hermes config set model.default "$FIRST_MODEL"
+          echo "Default model enforced: $FIRST_MODEL"
           hermes config set web.search_backend searxng
           hermes config set tts.provider edge
           hermes config set toolsets '["terminal","files","web","browser","code","vision","tts","memory","skills","delegation","cron"]'

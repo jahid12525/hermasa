@@ -2,11 +2,6 @@ name: Hermes Agent — Telegram + NVIDIA (all tools)
 
 on:
   workflow_dispatch:
-    inputs:
-      default_model:
-        description: "Default NVIDIA model (switch anytime with /model in Telegram)"
-        required: false
-        default: "nvidia/llama-3.1-nemotron-70b-instruct"
 
 concurrency:
   group: hermes-agent
@@ -105,20 +100,15 @@ jobs:
           GROQ_API_KEY=${GROQ_API_KEY}
           EOF
 
-      # ── 6. Configure Hermes (direct NVIDIA endpoint, model picked via /model in Telegram) ──
+      # ── 6. Configure Hermes (direct NVIDIA endpoint — pick model with /model in Telegram) ──
       - name: Configure Hermes
-        env:
-          DEFAULT_MODEL: ${{ inputs.default_model }}
         run: |
           hermes config unset providers.nim.base_url || true
           hermes config unset providers.nim.api_key_env || true
           hermes config unset model.base_url || true
           hermes config set model.provider "nvidia"
-          # Talk directly to NVIDIA's API — /model in Telegram lists all NVIDIA models:
           hermes config set providers.nvidia.base_url "https://integrate.api.nvidia.com/v1" || true
           hermes config set providers.nvidia.api_key_env NVIDIA_API_KEY || true
-          # Default model until you switch with /model:
-          hermes config set model.default "$DEFAULT_MODEL"
           hermes config set web.search_backend searxng
           hermes config set tts.provider edge
           hermes config set toolsets '["terminal","files","web","browser","code","vision","tts","memory","skills","delegation","cron"]'
@@ -161,7 +151,7 @@ jobs:
           TG_API="https://api.telegram.org"
           curl -s -X POST "${TG_API}/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_USER_ID}" \
-            -d text="🟢 Hermes Agent ONLINE — model: ${{ inputs.default_model }} (use /model to switch)" > /dev/null
+            -d text="🟢 Hermes Agent ONLINE — use /model in Telegram to pick an NVIDIA model" > /dev/null
 
       # ── 9. Run gateway with time budget ──
       - name: Run Hermes gateway

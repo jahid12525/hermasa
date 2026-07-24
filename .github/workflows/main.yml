@@ -6,7 +6,7 @@ on:
       models:
         description: "NVIDIA models to rotate (comma-separated, priority order)"
         required: false
-        default: "moonshotai/kimi-k2.6,deepseek-ai/deepseek-v3.1,qwen/qwen3-coder-480b-a35b-instruct,meta/llama-3.3-70b-instruct,nvidia/llama-3.1-nemotron-70b-instruct"
+        default: "nvidia/llama-3.1-nemotron-70b-instruct,nvidia/nemotron-3-super-120b-a12b,nvidia/llama-3.1-nemotron-ultra-253b-v1,z-ai/glm-5.2,z-ai/glm-5.1,meta/llama-3.3-70b-instruct"
 
 concurrency:
   group: hermes-agent
@@ -280,7 +280,7 @@ jobs:
 
           if __name__ == "__main__":
               if not MODELS:
-                  MODELS.append("moonshotai/kimi-k2.6")
+                  MODELS.append("nvidia/llama-3.1-nemotron-70b-instruct")
               print("[rotator] rotation pool:", MODELS, flush=True)
               ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
           PYEOF

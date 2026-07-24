@@ -3,10 +3,10 @@ name: Hermes Agent — Telegram + NVIDIA (all tools)
 on:
   workflow_dispatch:
     inputs:
-      models:
-        description: "NVIDIA models to rotate (comma-separated, priority order)"
+      default_model:
+        description: "Default NVIDIA model (switch anytime with /model in Telegram)"
         required: false
-        default: "nvidia/llama-3.1-nemotron-70b-instruct,nvidia/nemotron-3-super-120b-a12b,nvidia/llama-3.1-nemotron-ultra-253b-v1,z-ai/glm-5.2,z-ai/glm-5.1,meta/llama-3.3-70b-instruct"
+        default: "nvidia/llama-3.1-nemotron-70b-instruct"
 
 concurrency:
   group: hermes-agent
@@ -105,205 +105,20 @@ jobs:
           GROQ_API_KEY=${GROQ_API_KEY}
           EOF
 
-      # ── 5.5 Start NVIDIA model-rotation proxy (pure stdlib, no 3rd-party) ──
-      - name: Start model rotator
-        env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
-          NVIDIA_MODELS: ${{ inputs.models }}
-        run: |
-          cat > /tmp/rotator.py <<'PYEOF'
-          #!/usr/bin/env python3
-          """NVIDIA model-rotation proxy for Hermes Agent — pure stdlib.
-          Rotates models on rate limit, 10-min global cooldown, Telegram notices."""
-          import json, os, time, threading
-          import urllib.parse, urllib.request, urllib.error
-          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-          UPSTREAM  = "https://integrate.api.nvidia.com"
-          API_KEY   = os.environ["NVIDIA_API_KEY"]
-          MODELS    = [m.strip() for m in os.environ.get("NVIDIA_MODELS", "").split(",") if m.strip()]
-          COOLDOWN  = int(os.environ.get("MODEL_COOLDOWN_SECONDS", "600"))  # 10 minutes
-          PORT      = int(os.environ.get("ROTATOR_PORT", "8765"))
-          TG_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-          TG_CHAT   = os.environ.get("TELEGRAM_USER_ID", "")
-          ROTATE_ON = {429, 500, 502, 503}
-
-          _lock = threading.Lock()
-          _cooldown_until = {}          # model -> epoch seconds when usable again
-          _last_tg = {"text": None, "ts": 0.0}
-
-          def tg_send(text):
-              if not TG_TOKEN or not TG_CHAT:
-                  return
-              with _lock:
-                  now = time.time()
-                  if _last_tg["text"] == text and now - _last_tg["ts"] < 60:
-                      return                     # don't spam identical messages
-                  _last_tg["text"], _last_tg["ts"] = text, now
-              try:
-                  data = urllib.parse.urlencode({"chat_id": TG_CHAT, "text": text}).encode()
-                  urllib.request.urlopen(urllib.request.Request(
-                      "https://api.telegram.org/bot%s/sendMessage" % TG_TOKEN, data=data), timeout=10)
-              except Exception:
-                  pass
-
-          def model_order(preferred):
-              order = []
-              if preferred:
-                  order.append(preferred)       # /model choice in Telegram = top priority
-              for m in MODELS:
-                  if m not in order:
-                      order.append(m)
-              return order
-
-          def usable(m):
-              with _lock:
-                  return _cooldown_until.get(m, 0) <= time.time()
-
-          def mark_limited(m, seconds):
-              with _lock:
-                  _cooldown_until[m] = time.time() + seconds
-
-          class Handler(BaseHTTPRequestHandler):
-              def log_message(self, fmt, *args):
-                  print("[rotator]", fmt % args, flush=True)
-
-              def _send(self, code, body, ctype="application/json"):
-                  self.send_response(code)
-                  self.send_header("Content-Type", ctype)
-                  self.send_header("Content-Length", str(len(body)))
-                  self.end_headers()
-                  self.wfile.write(body)
-
-              def do_GET(self):
-                  if self.path.rstrip("/").endswith("/models"):
-                      body = json.dumps({"object": "list", "data": [
-                          {"id": m, "object": "model", "owned_by": "nvidia"} for m in MODELS
-                      ]}).encode()
-                      self._send(200, body)
-                      return
-                  self._proxy(None)
-
-              def do_POST(self):
-                  length = int(self.headers.get("Content-Length") or 0)
-                  raw = self.rfile.read(length) if length else b""
-                  self._proxy(raw)
-
-              def _proxy(self, raw):
-                  payload = None
-                  if raw:
-                      try:
-                          payload = json.loads(raw.decode("utf-8"))
-                      except Exception:
-                          payload = None
-                  preferred = payload.get("model") if isinstance(payload, dict) else None
-                  order = model_order(preferred)
-
-                  while True:
-                      avail = [m for m in order if usable(m)]
-
-                      # ── All models exhausted: 10-min cooldown, task NOT lost ──
-                      if not avail:
-                          with _lock:
-                              soonest = min(_cooldown_until.get(m, 0) for m in order)
-                          wait = max(5, min(soonest - time.time(), COOLDOWN))
-                          tg_send("⏳ All NVIDIA models hit their rate limits. "
-                                  "Please wait 10 minutes for cooldown — "
-                                  "your task will continue automatically, nothing is lost.")
-                          print("[rotator] all models cooling, sleeping %ds" % wait, flush=True)
-                          time.sleep(wait)
-                          tg_send("✅ Cooldown finished — resuming your task now.")
-                          continue
-
-                      model = avail[0]
-                      if isinstance(payload, dict) and "model" in payload:
-                          payload["model"] = model
-                          body = json.dumps(payload).encode("utf-8")
-                      else:
-                          body = raw or None
-
-                      req = urllib.request.Request(UPSTREAM + self.path, data=body, method=self.command)
-                      req.add_header("Authorization", "Bearer " + API_KEY)
-                      req.add_header("Content-Type", self.headers.get("Content-Type") or "application/json")
-                      if self.headers.get("Accept"):
-                          req.add_header("Accept", self.headers["Accept"])
-
-                      try:
-                          resp = urllib.request.urlopen(req, timeout=900)
-                      except urllib.error.HTTPError as e:
-                          if e.code in ROTATE_ON:
-                              retry = COOLDOWN
-                              ra = e.headers.get("Retry-After") if e.headers else None
-                              if ra and ra.isdigit():
-                                  retry = max(int(ra), 30)
-                              mark_limited(model, retry)
-                              nxt = [m for m in order if usable(m)]
-                              if nxt:
-                                  tg_send("⚠️ Model '%s' rate-limited (HTTP %d). "
-                                          "Instantly switching to '%s' — task continues."
-                                          % (model, e.code, nxt[0]))
-                              print("[rotator] %s -> HTTP %d, cooling %ds" % (model, e.code, retry), flush=True)
-                              continue                       # retry same request on next model
-                          try:
-                              err = e.read()
-                          except Exception:
-                              err = b'{"error":"upstream error"}'
-                          self._send(e.code, err)
-                          return
-                      except Exception as e:
-                          mark_limited(model, 30)            # brief network hiccup
-                          print("[rotator] network error on %s: %s" % (model, e), flush=True)
-                          continue
-
-                      # ── Success: stream response back (SSE-safe) ──
-                      self.send_response(resp.status)
-                      self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
-                      self.send_header("X-Rotator-Model", model)
-                      self.end_headers()
-                      try:
-                          while True:
-                              chunk = resp.read(8192)
-                              if not chunk:
-                                  break
-                              self.wfile.write(chunk)
-                              self.wfile.flush()
-                      except (BrokenPipeError, ConnectionResetError):
-                          pass
-                      finally:
-                          try:
-                              resp.close()
-                          except Exception:
-                              pass
-                      return
-
-          if __name__ == "__main__":
-              if not MODELS:
-                  MODELS.append("nvidia/llama-3.1-nemotron-70b-instruct")
-              print("[rotator] rotation pool:", MODELS, flush=True)
-              ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
-          PYEOF
-
-          nohup python3 /tmp/rotator.py > /tmp/rotator.log 2>&1 &
-          sleep 2
-          curl -sf http://127.0.0.1:8765/v1/models > /dev/null \
-            && echo "Rotator proxy is up on :8765" \
-            || (cat /tmp/rotator.log; exit 1)
-
-      # ── 6. Configure Hermes (all traffic via rotation proxy) ──
+      # ── 6. Configure Hermes (direct NVIDIA endpoint, model picked via /model in Telegram) ──
       - name: Configure Hermes
         env:
-          NVIDIA_MODELS: ${{ inputs.models }}
+          DEFAULT_MODEL: ${{ inputs.default_model }}
         run: |
           hermes config unset providers.nim.base_url || true
           hermes config unset providers.nim.api_key_env || true
+          hermes config unset model.base_url || true
           hermes config set model.provider "nvidia"
-          # Route ALL model traffic through the local rotator proxy:
-          hermes config set model.base_url "http://127.0.0.1:8765/v1" || true
-          hermes config set providers.nvidia.base_url "http://127.0.0.1:8765/v1" || true
-          # Default model = first in your rotation list:
-          hermes config set model.default "$(echo "$NVIDIA_MODELS" | cut -d',' -f1)"
+          # Talk directly to NVIDIA's API — /model in Telegram lists all NVIDIA models:
+          hermes config set providers.nvidia.base_url "https://integrate.api.nvidia.com/v1" || true
+          hermes config set providers.nvidia.api_key_env NVIDIA_API_KEY || true
+          # Default model until you switch with /model:
+          hermes config set model.default "$DEFAULT_MODEL"
           hermes config set web.search_backend searxng
           hermes config set tts.provider edge
           hermes config set toolsets '["terminal","files","web","browser","code","vision","tts","memory","skills","delegation","cron"]'
@@ -346,7 +161,7 @@ jobs:
           TG_API="https://api.telegram.org"
           curl -s -X POST "${TG_API}/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_USER_ID}" \
-            -d text="🟢 Hermes Agent ONLINE — auto model rotation active: ${{ inputs.models }}" > /dev/null
+            -d text="🟢 Hermes Agent ONLINE — model: ${{ inputs.default_model }} (use /model to switch)" > /dev/null
 
       # ── 9. Run gateway with time budget ──
       - name: Run Hermes gateway

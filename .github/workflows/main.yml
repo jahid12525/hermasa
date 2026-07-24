@@ -3,9 +3,9 @@ name: Hermes Agent — Telegram + NVIDIA (all tools)
 on:
   workflow_dispatch:
     inputs:
-      nvidia_models:
-        description: "NVIDIA models (comma-separated, priority order)"
-        required: true
+      models:
+        description: "NVIDIA models to rotate (comma-separated, priority order)"
+        required: false
         default: "moonshotai/kimi-k2.6,deepseek-ai/deepseek-v3.1,qwen/qwen3-coder-480b-a35b-instruct,meta/llama-3.3-70b-instruct,nvidia/llama-3.1-nemotron-70b-instruct"
 
 concurrency:
@@ -16,7 +16,6 @@ env:
   RUN_MINUTES: 330
   HERMES_HOME: /home/runner/.hermes
   DATA_REPO: jahid12525/harmesprivatestorage
-  NVIDIA_MODELS: ${{ inputs.nvidia_models }}
 
 jobs:
   run-agent:
@@ -48,7 +47,7 @@ jobs:
         run: |
           rm -rf "$HERMES_HOME/hermes-agent"
           curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       # ── 3. Start SearXNG (free web search) ──
       - name: Start SearXNG
@@ -76,36 +75,19 @@ jobs:
           done
           echo "SearXNG failed to start"; exit 1
 
-      # ── 4. Start Camoufox (stealth browser, persistent profile) ──
-      # Profile lives inside $HERMES_HOME so cookies/logins survive browser
-      # restarts AND get backed up to the data repo between runs.
+      # ── 4. Start Camoufox (stealth browser) ──
       - name: Start Camoufox
         run: |
           pip install -U "camoufox[geoip]"
           python3 -m camoufox fetch
-          mkdir -p "$HERMES_HOME/camoufox-profile"
           nohup python3 -c "
-          import os
-          from camoufox.server import launch_server
-          launch_server(headless=True, port=9222, ws_path='hermes',
-                        persistent_context=True,
-                        user_data_dir=os.environ['HERMES_HOME'] + '/camoufox-profile')
-          " > /tmp/camoufox.log 2>&1 &
-          sleep 20
-          if python3 -c "import socket; socket.create_connection(('127.0.0.1', 9222), 5)" 2>/dev/null; then
-            echo "Camoufox launched with persistent profile"
-          else
-            echo "Persistent profile mode failed, falling back to ephemeral browser:"
-            cat /tmp/camoufox.log || true
-            nohup python3 -c "
           from camoufox.server import launch_server
           launch_server(headless=True, port=9222, ws_path='hermes')
           " > /tmp/camoufox.log 2>&1 &
-            sleep 20
-            echo "Camoufox launched (ephemeral)"
-          fi
+          sleep 20
+          echo "Camoufox launched"
 
-      # ── 5. Write .env ──
+      # ── 5. Write .env (NVIDIA_API_KEY included — direct provider mode) ──
       - name: Write .env
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -123,26 +105,25 @@ jobs:
           GROQ_API_KEY=${GROQ_API_KEY}
           EOF
 
-      # ── 5.5 Start NVIDIA rotation proxy (pure stdlib, no 3rd-party) ──
+      # ── 5.5 Start NVIDIA model-rotation proxy (pure stdlib, no 3rd-party) ──
       - name: Start model rotator
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
+          NVIDIA_MODELS: ${{ inputs.models }}
         run: |
           cat > /tmp/rotator.py <<'PYEOF'
           #!/usr/bin/env python3
-          """NVIDIA model rotation proxy for Hermes Agent — pure stdlib.
-          Rotates on rate limit, 10-min cooldown, Telegram notices.
-          No built-in models: the pool is exactly the NVIDIA_MODELS input."""
+          """NVIDIA model-rotation proxy for Hermes Agent — pure stdlib.
+          Rotates models on rate limit, 10-min global cooldown, Telegram notices."""
           import json, os, time, threading
           import urllib.parse, urllib.request, urllib.error
           from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-          UPSTREAM = "https://integrate.api.nvidia.com"
-          API_KEY  = os.environ.get("NVIDIA_API_KEY", "")
-          MODELS   = [m.strip() for m in os.environ.get("NVIDIA_MODELS", "").split(",") if m.strip()]
-
+          UPSTREAM  = "https://integrate.api.nvidia.com"
+          API_KEY   = os.environ["NVIDIA_API_KEY"]
+          MODELS    = [m.strip() for m in os.environ.get("NVIDIA_MODELS", "").split(",") if m.strip()]
           COOLDOWN  = int(os.environ.get("MODEL_COOLDOWN_SECONDS", "600"))  # 10 minutes
           PORT      = int(os.environ.get("ROTATOR_PORT", "8765"))
           TG_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -170,7 +151,7 @@ jobs:
 
           def model_order(preferred):
               order = []
-              if preferred and preferred in MODELS:
+              if preferred:
                   order.append(preferred)       # /model choice in Telegram = top priority
               for m in MODELS:
                   if m not in order:
@@ -184,36 +165,6 @@ jobs:
           def mark_limited(m, seconds):
               with _lock:
                   _cooldown_until[m] = time.time() + seconds
-
-          def validate_models():
-              """Check the configured ids against NVIDIA's real model list.
-              Drops invalid ids (with Telegram notice + closest-match hints)."""
-              global MODELS
-              try:
-                  req = urllib.request.Request(UPSTREAM + "/v1/models")
-                  req.add_header("Authorization", "Bearer " + API_KEY)
-                  data = json.load(urllib.request.urlopen(req, timeout=30))
-                  upstream = set()
-                  for m in data.get("data", []):
-                      if isinstance(m, dict) and m.get("id"):
-                          upstream.add(m["id"])
-              except Exception as e:
-                  print("[rotator] could not fetch upstream model list (%s); keeping pool as-is" % e, flush=True)
-                  return
-              if not upstream:
-                  return
-              import difflib
-              good = [m for m in MODELS if m in upstream]
-              bad  = [m for m in MODELS if m not in upstream]
-              for b in bad:
-                  close = difflib.get_close_matches(b, upstream, n=3, cutoff=0.3)
-                  print("[rotator] INVALID id '%s' \u2014 closest real ids: %s" % (b, close), flush=True)
-              if bad:
-                  tg_send("\u26a0\ufe0f These NVIDIA model ids don't exist and were removed from the pool: %s" % ", ".join(bad))
-              if not good:
-                  tg_send("\ud83d\udd34 NONE of the configured NVIDIA model ids exist \u2014 fix the nvidia_models input field.")
-                  raise SystemExit("No valid models: %s" % MODELS)
-              MODELS = good
 
           class Handler(BaseHTTPRequestHandler):
               def log_message(self, fmt, *args):
@@ -233,25 +184,12 @@ jobs:
                       ]}).encode()
                       self._send(200, body)
                       return
-                  self._safe_proxy(None)
+                  self._proxy(None)
 
               def do_POST(self):
                   length = int(self.headers.get("Content-Length") or 0)
                   raw = self.rfile.read(length) if length else b""
-                  self._safe_proxy(raw)
-
-              def _safe_proxy(self, raw):
-                  try:
-                      self._proxy(raw)
-                  except (BrokenPipeError, ConnectionResetError):
-                      pass
-                  except Exception:
-                      import traceback
-                      print("[rotator] handler crash:\n" + traceback.format_exc(), flush=True)
-                      try:
-                          self._send(502, b'{"error":"rotator internal error"}')
-                      except Exception:
-                          pass
+                  self._proxy(raw)
 
               def _proxy(self, raw):
                   payload = None
@@ -261,28 +199,22 @@ jobs:
                       except Exception:
                           payload = None
                   preferred = payload.get("model") if isinstance(payload, dict) else None
-                  if preferred and preferred not in MODELS:
-                      # Stale/unknown model (e.g. restored old session) -> force pool model
-                      print("[rotator] requested model '%s' NOT in pool; overriding with '%s'"
-                            % (preferred, MODELS[0]), flush=True)
                   order = model_order(preferred)
 
                   while True:
                       avail = [m for m in order if usable(m)]
 
-                      # ── All models exhausted: cooldown, task NOT lost ──
+                      # ── All models exhausted: 10-min cooldown, task NOT lost ──
                       if not avail:
                           with _lock:
                               soonest = min(_cooldown_until.get(m, 0) for m in order)
-                          if soonest > time.time() + 86400:
-                              self._send(502, b'{"error":"no usable models: all ids invalid or dead"}')
-                              return
                           wait = max(5, min(soonest - time.time(), COOLDOWN))
-                          tg_send("\u23f3 All NVIDIA models hit rate limits. "
-                                  "Waiting for cooldown \u2014 your task will continue automatically, nothing is lost.")
+                          tg_send("⏳ All NVIDIA models hit their rate limits. "
+                                  "Please wait 10 minutes for cooldown — "
+                                  "your task will continue automatically, nothing is lost.")
                           print("[rotator] all models cooling, sleeping %ds" % wait, flush=True)
                           time.sleep(wait)
-                          tg_send("\u2705 Cooldown finished \u2014 resuming your task now.")
+                          tg_send("✅ Cooldown finished — resuming your task now.")
                           continue
 
                       model = avail[0]
@@ -291,28 +223,16 @@ jobs:
                           body = json.dumps(payload).encode("utf-8")
                       else:
                           body = raw or None
-                      req = urllib.request.Request(UPSTREAM + self.path,
-                                                   data=body, method=self.command)
+
+                      req = urllib.request.Request(UPSTREAM + self.path, data=body, method=self.command)
                       req.add_header("Authorization", "Bearer " + API_KEY)
-                      req.add_header("Content-Type",
-                                     self.headers.get("Content-Type") or "application/json")
+                      req.add_header("Content-Type", self.headers.get("Content-Type") or "application/json")
                       if self.headers.get("Accept"):
                           req.add_header("Accept", self.headers["Accept"])
 
                       try:
                           resp = urllib.request.urlopen(req, timeout=900)
                       except urllib.error.HTTPError as e:
-                          if e.code == 404:
-                              mark_limited(model, 10**9)   # dead id: never retry
-                              nxt = [m for m in order if usable(m)]
-                              if nxt:
-                                  tg_send("\u26a0\ufe0f Model '%s' not found on NVIDIA API (404) \u2014 switching to '%s'."
-                                          % (model, nxt[0]))
-                              print("[rotator] %s -> HTTP 404, marked dead" % model, flush=True)
-                              if not nxt:
-                                  self._send(502, b'{"error":"all configured models invalid (404)"}')
-                                  return
-                              continue
                           if e.code in ROTATE_ON:
                               retry = COOLDOWN
                               ra = e.headers.get("Retry-After") if e.headers else None
@@ -321,8 +241,8 @@ jobs:
                               mark_limited(model, retry)
                               nxt = [m for m in order if usable(m)]
                               if nxt:
-                                  tg_send("\u26a0\ufe0f Model '%s' rate-limited (HTTP %d). "
-                                          "Switching to '%s' \u2014 task continues."
+                                  tg_send("⚠️ Model '%s' rate-limited (HTTP %d). "
+                                          "Instantly switching to '%s' — task continues."
                                           % (model, e.code, nxt[0]))
                               print("[rotator] %s -> HTTP %d, cooling %ds" % (model, e.code, retry), flush=True)
                               continue                       # retry same request on next model
@@ -330,8 +250,6 @@ jobs:
                               err = e.read()
                           except Exception:
                               err = b'{"error":"upstream error"}'
-                          print("[rotator] %s -> HTTP %d (not rotating): %s"
-                                % (model, e.code, err[:300]), flush=True)
                           self._send(e.code, err)
                           return
                       except Exception as e:
@@ -339,8 +257,7 @@ jobs:
                           print("[rotator] network error on %s: %s" % (model, e), flush=True)
                           continue
 
-                      # ── Success: stream passthrough (SSE-safe) ──
-                      print("[rotator] %s -> HTTP %d via %s" % (self.path, resp.status, model), flush=True)
+                      # ── Success: stream response back (SSE-safe) ──
                       self.send_response(resp.status)
                       self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
                       self.send_header("X-Rotator-Model", model)
@@ -363,10 +280,8 @@ jobs:
 
           if __name__ == "__main__":
               if not MODELS:
-                  raise SystemExit("No models configured — fill the nvidia_models input field")
-              print("[rotator] configured pool:", MODELS, flush=True)
-              validate_models()
-              print("[rotator] validated pool:", MODELS, flush=True)
+                  MODELS.append("moonshotai/kimi-k2.6")
+              print("[rotator] rotation pool:", MODELS, flush=True)
               ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
           PYEOF
 
@@ -376,48 +291,10 @@ jobs:
             && echo "Rotator proxy is up on :8765" \
             || (cat /tmp/rotator.log; exit 1)
 
-      # ── 5.6 Smoke test: verify NVIDIA key + first model actually answers ──
-      - name: Smoke test provider
-        env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-        run: |
-          M="$(echo "$NVIDIA_MODELS" | cut -d',' -f1)"
-          echo "── Model id check against NVIDIA API ──"
-          curl -sS --max-time 60 https://integrate.api.nvidia.com/v1/models \
-            -H "Authorization: Bearer ${NVIDIA_API_KEY}" -o /tmp/nv_models.json -w "HTTP %{http_code}\n" || true
-          python3 - <<'PY' || true
-          import difflib, json, os
-          try:
-              ids = [m["id"] for m in json.load(open("/tmp/nv_models.json")).get("data", [])]
-          except Exception as e:
-              ids = []
-              print("could not parse model list:", e)
-          want = [w.strip() for w in os.environ["NVIDIA_MODELS"].split(",") if w.strip()]
-          for w in want:
-              if w in ids:
-                  print("OK    " + w)
-              elif ids:
-                  print("WRONG " + w + "  -> did you mean: " + ", ".join(difflib.get_close_matches(w, ids, n=3, cutoff=0.3)))
-          PY
-          echo "── Direct NVIDIA ($M) ──"
-          curl -sS -o /tmp/nv_direct.json -w "HTTP %{http_code}\n" --max-time 120 \
-            https://integrate.api.nvidia.com/v1/chat/completions \
-            -H "Authorization: Bearer ${NVIDIA_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d "{\"model\":\"$M\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the word OK\"}],\"max_tokens\":16}" || true
-          head -c 400 /tmp/nv_direct.json; echo
-          MV="$(curl -s http://127.0.0.1:8765/v1/models | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; print(d[0]["id"] if d else "")')"
-          echo "── Through rotator proxy (first VALID model: $MV) ──"
-          curl -sS -o /tmp/rot_test.json -w "HTTP %{http_code}\n" --max-time 180 \
-            http://127.0.0.1:8765/v1/chat/completions \
-            -H "Content-Type: application/json" \
-            -d "{\"model\":\"$MV\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the word OK\"}],\"max_tokens\":16}" || true
-          head -c 400 /tmp/rot_test.json; echo
-          echo "── Rotator log ──"
-          tail -50 /tmp/rotator.log || true
-
       # ── 6. Configure Hermes (all traffic via rotation proxy) ──
       - name: Configure Hermes
+        env:
+          NVIDIA_MODELS: ${{ inputs.models }}
         run: |
           hermes config unset providers.nim.base_url || true
           hermes config unset providers.nim.api_key_env || true
@@ -425,18 +302,11 @@ jobs:
           # Route ALL model traffic through the local rotator proxy:
           hermes config set model.base_url "http://127.0.0.1:8765/v1" || true
           hermes config set providers.nvidia.base_url "http://127.0.0.1:8765/v1" || true
-          # Default model = first VALID model from the rotator's checked pool:
-          FIRST_MODEL="$(curl -s http://127.0.0.1:8765/v1/models | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; print(d[0]["id"] if d else "")')"
-          if [ -z "$FIRST_MODEL" ]; then
-            echo "ERROR: no valid model available — check the nvidia_models input"; exit 1
-          fi
-          # Clear any model choice persisted in the data repo from previous runs:
-          hermes config unset model.default || true
-          hermes config unset model.name || true
-          hermes config set model.default "$FIRST_MODEL"
-          echo "Default model enforced: $FIRST_MODEL"
+          # Default model = first in your rotation list:
+          hermes config set model.default "$(echo "$NVIDIA_MODELS" | cut -d',' -f1)"
           hermes config set web.search_backend searxng
-          hermes config set toolsets '["terminal","files","web","browser","code","vision","memory","skills","delegation","cron"]'
+          hermes config set tts.provider edge
+          hermes config set toolsets '["terminal","files","web","browser","code","vision","tts","memory","skills","delegation","cron"]'
           hermes doctor || true
           echo "── Final model config ──"
           hermes config get model || true
@@ -451,9 +321,7 @@ jobs:
           while true; do
             sleep 1800
             rm -rf /tmp/backup && mkdir -p /tmp/backup
-            rsync -a --exclude='.env' --exclude='.git' --exclude='*.log' --exclude='hermes-agent' \
-              --exclude='cache2' --exclude='startupCache' --exclude='shader-cache' --exclude='thumbnails' \
-              "$HERMES_HOME/" /tmp/backup/
+            rsync -a --exclude='.env' --exclude='.git' --exclude='*.log' --exclude='hermes-agent' "$HERMES_HOME/" /tmp/backup/
             cd /tmp/backup
             find . -type f -size +90M | while read -r f; do
               split -b 90M -d -a 3 "$f" "$f.gh-chunk."
@@ -478,7 +346,7 @@ jobs:
           TG_API="https://api.telegram.org"
           curl -s -X POST "${TG_API}/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_USER_ID}" \
-            -d text="🟢 Hermes Agent ONLINE — NVIDIA rotation pool: ${NVIDIA_MODELS}" > /dev/null
+            -d text="🟢 Hermes Agent ONLINE — auto model rotation active: ${{ inputs.models }}" > /dev/null
 
       # ── 9. Run gateway with time budget ──
       - name: Run Hermes gateway
@@ -497,11 +365,6 @@ jobs:
             sleep 10
           done
 
-      # ── 9.5 Dump rotator log (shows every upstream call + errors) ──
-      - name: Dump rotator log
-        if: always()
-        run: tail -200 /tmp/rotator.log || true
-
       # ── 10. Final push to data repo (main) ──
       - name: Final data push
         if: always()
@@ -509,9 +372,7 @@ jobs:
           DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
         run: |
           rm -rf /tmp/final && mkdir -p /tmp/final
-          rsync -a --exclude='.env' --exclude='.git' --exclude='*.log' --exclude='hermes-agent' \
-            --exclude='cache2' --exclude='startupCache' --exclude='shader-cache' --exclude='thumbnails' \
-            "$HERMES_HOME/" /tmp/final/ || true
+          rsync -a --exclude='.env' --exclude='.git' --exclude='*.log' --exclude='hermes-agent' "$HERMES_HOME/" /tmp/final/ || true
           cd /tmp/final
           find . -type f -size +90M | while read -r f; do
             split -b 90M -d -a 3 "$f" "$f.gh-chunk."

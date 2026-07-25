@@ -380,13 +380,15 @@ jobs:
               pool = request.get_json()["pool"]
               save_pool(pool)
               write_config(pool)
-              subprocess.run(["docker", "restart", "litellm"], check=False)
+              # fire-and-forget restart: respond immediately, don't block the request
+              subprocess.Popen(["docker", "restart", "litellm"],
+                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
               return jsonify({"ok": True, "count": len(pool)})
 
           if __name__ == "__main__":
               if "--init" in sys.argv:
                   write_config(load_pool()); sys.exit(0)
-              app.run(host="0.0.0.0", port=7000)
+              app.run(host="0.0.0.0", port=7000, threaded=True)
           PYEOF
 
           # default starting pool (only if none restored from backup repo)

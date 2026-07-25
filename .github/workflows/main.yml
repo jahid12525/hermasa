@@ -151,9 +151,21 @@ jobs:
               L += ["router_settings:",
                     "  routing_strategy: simple-shuffle",
                     "  num_retries: 3",
+                    "  retry_after: 5",
                     "  allowed_fails: 2",
-                    "  cooldown_time: 120",
-                    "litellm_settings:",
+                    "  cooldown_time: 120"]
+              # auto cross-provider fallbacks: prefer models from the OTHER provider
+              fb = []
+              for it in pool:
+                  others = [x["id"] for x in pool if x["id"] != it["id"]]
+                  others.sort(key=lambda n: 0 if any(
+                      x["id"] == n and x["provider"] != it["provider"] for x in pool) else 1)
+                  if others:
+                      fb.append('    - {"%s": ["%s"]}' % (it["id"], '", "'.join(others[:2])))
+              if fb:
+                  L.append("  fallbacks:")
+                  L += fb
+              L += ["litellm_settings:",
                     "  drop_params: true"]
               open(CFG, "w").write("\n".join(L) + "\n")
 
@@ -483,7 +495,25 @@ jobs:
           GROQ_API_KEY=${GROQ_API_KEY}
           EOF
 
-      # ── 8. Configure Hermes (points at LiteLLM pool router) ──
+      # ── 8. Standing instructions for the agent (auto save-to-file) ──
+      - name: Write agent instructions
+        run: |
+          mkdir -p "$HERMES_HOME/work"
+          cat > "$HOME/AGENTS.md" <<'EOF'
+          # Standing instructions
+          - For any long or multi-step task (scraping, research, data
+            collection, comparisons), IMMEDIATELY append each intermediate
+            result to a file under ~/.hermes/work/ as you go. Never keep
+            results only in the conversation.
+          - Use one file per task, named by date and topic
+            (e.g. ~/.hermes/work/2026-07-25-price-scrape.md).
+          - When the task finishes, tell the user the file path.
+          - These files are backed up automatically; treat them as the
+            source of truth for task results.
+          EOF
+          echo "Agent instructions written to $HOME/AGENTS.md"
+
+      # ── 9. Configure Hermes (points at LiteLLM pool router) ──
       - name: Configure Hermes
         run: |
           hermes config unset providers.nvidia.base_url || true
@@ -494,6 +524,7 @@ jobs:
           hermes config set model.base_url "http://localhost:4000/v1"
           hermes config set model.api_key "sk-local"
           hermes config set model.default "gemma4:31b"
+          hermes config set model.context_length 65536
           hermes config set web.search_backend searxng
           hermes config set tts.provider edge
           hermes config set toolsets '["terminal","files","web","browser","code","vision","tts","memory","skills","delegation","cron"]'
@@ -501,7 +532,7 @@ jobs:
           echo "── Final model config ──"
           hermes config get model || true
 
-      # ── 9. Background backup loop (every 30 min -> backup branch) ──
+      # ── 10. Background backup loop (every 30 min -> backup branch) ──
       - name: Start backup loop
         env:
           DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
@@ -531,7 +562,7 @@ jobs:
           HERMES_HOME="$HERMES_HOME" DATA_REPO="$DATA_REPO" DATA_REPO_TOKEN="$DATA_REPO_TOKEN" \
             nohup /tmp/sync.sh > /tmp/sync.log 2>&1 &
 
-      # ── 10. Notify start on Telegram (includes panel link) ──
+      # ── 11. Notify start on Telegram (includes panel link) ──
       - name: Notify start
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -545,7 +576,7 @@ jobs:
           🔑 Password: your PANEL_TOKEN secret
           Use /model in Telegram to pick from the pool" > /dev/null
 
-      # ── 11. Run gateway with time budget ──
+      # ── 12. Run gateway with time budget ──
       - name: Run Hermes gateway
         run: |
           JOB_START=$(cat /tmp/job_start)
@@ -562,7 +593,7 @@ jobs:
             sleep 10
           done
 
-      # ── 12. Final push to data repo (main) ──
+      # ── 13. Final push to data repo (main) ──
       - name: Final data push
         if: always()
         env:
@@ -587,7 +618,7 @@ jobs:
           git add -A && git commit -q -m "final save $(date -u +%FT%TZ)" || true
           git push -f "https://x-access-token:${DATA_REPO_TOKEN}@github.com/${DATA_REPO}.git" main
 
-      # ── 13. Notify failure ──
+      # ── 14. Notify failure ──
       - name: Notify failure
         if: failure()
         env:

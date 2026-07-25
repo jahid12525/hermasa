@@ -1,4 +1,4 @@
-name: Hermes Agent — Telegram + NVIDIA (all tools)
+name: Hermes Agent — Telegram + Ollama/NVIDIA Pool
 
 on:
   workflow_dispatch:
@@ -35,6 +35,8 @@ jobs:
               rm -f "${base}".gh-chunk.*
               echo "Reassembled: $base"
             done
+            # restore saved model pool selection
+            [ -f "$HERMES_HOME/pool.json" ] && cp "$HERMES_HOME/pool.json" /tmp/pool.json || true
           fi
 
       # ── 2. Install Hermes Agent ──
@@ -82,12 +84,213 @@ jobs:
           sleep 20
           echo "Camoufox launched"
 
-      # ── 5. Write .env (NVIDIA_API_KEY included — direct provider mode) ──
+      # ── 5. Write model pool control panel ──
+      - name: Write control panel
+        run: |
+          pip install -q flask
+          mkdir -p /tmp/panel
+          cat > /tmp/panel/app.py <<'PYEOF'
+          import os, json, subprocess, sys, urllib.request
+          from flask import Flask, request, jsonify
+
+          app = Flask(__name__)
+          TOKEN = os.environ["PANEL_TOKEN"]
+          OLLAMA_KEY_NAMES = sorted(k for k in os.environ if k.startswith("OLLAMA_KEY_") and os.environ[k])
+          NVIDIA_KEY_NAMES = sorted(k for k in os.environ if k.startswith("NVIDIA_KEY_") and os.environ[k])
+          POOL, CFG = "/tmp/pool.json", "/tmp/litellm.yaml"
+
+          def authed():
+              return request.args.get("token") == TOKEN
+
+          def fetch(base, key):
+              r = urllib.request.Request(base + "/models",
+                  headers={"Authorization": "Bearer " + os.environ[key]})
+              with urllib.request.urlopen(r, timeout=30) as resp:
+                  return sorted(m["id"] for m in json.load(resp)["data"])
+
+          def load_pool():
+              try:
+                  return json.load(open(POOL))
+              except Exception:
+                  return []
+
+          def write_config(pool):
+              L = ["model_list:"]
+              for it in pool:
+                  keys = OLLAMA_KEY_NAMES if it["provider"] == "ollama" else NVIDIA_KEY_NAMES
+                  for k in keys:
+                      L.append('  - model_name: "%s"' % it["id"])
+                      L.append("    litellm_params:")
+                      if it["provider"] == "ollama":
+                          L.append('      model: "openai/%s"' % it["id"])
+                          L.append('      api_base: "https://ollama.com/v1"')
+                      else:
+                          L.append('      model: "nvidia_nim/%s"' % it["id"])
+                      L.append("      api_key: os.environ/" + k)
+              L += ["router_settings:",
+                    "  routing_strategy: simple-shuffle",
+                    "  num_retries: 3",
+                    "  allowed_fails: 2",
+                    "  cooldown_time: 120",
+                    "litellm_settings:",
+                    "  drop_params: true"]
+              open(CFG, "w").write("\n".join(L) + "\n")
+
+          HTML = """<!doctype html><html><head><meta name=viewport content="width=device-width,initial-scale=1">
+          <title>Hermes Model Pool</title><style>
+          body{font-family:system-ui;background:#111;color:#eee;max-width:760px;margin:20px auto;padding:0 12px}
+          h2{color:#7dd3fc}.col{display:inline-block;vertical-align:top;width:48%;min-width:280px}
+          label{display:block;padding:6px 10px;margin:4px 0;background:#1e1e1e;border-radius:8px;cursor:pointer}
+          label:has(input:checked){background:#134e4a;outline:1px solid #2dd4bf}
+          button{background:#2dd4bf;color:#000;border:0;padding:12px 28px;border-radius:8px;
+          font-size:16px;font-weight:bold;cursor:pointer;margin:16px 0}
+          #status{padding:8px;color:#fbbf24}</style></head><body>
+          <h1>🎛️ Hermes Model Pool</h1><div id=status>Loading catalogs…</div>
+          <div class=col><h2>Ollama Cloud</h2><div id=ollama></div></div>
+          <div class=col><h2>NVIDIA</h2><div id=nvidia></div></div>
+          <br><button onclick=apply()>✅ Apply pool (restarts router)</button>
+          <script>
+          const T = new URLSearchParams(location.search).get('token');
+          let pool = [];
+          fetch('/api/models?token='+T).then(r=>r.json()).then(d=>{
+            pool = d.pool;
+            for (const prov of ['ollama','nvidia']) {
+              document.getElementById(prov).innerHTML = d[prov].map(id =>
+                `<label><input type=checkbox data-p=${prov} value="${id}" ${
+                  pool.some(x=>x.provider===prov&&x.id===id)?'checked':''}> ${id}</label>`).join('')
+                || '<i>none / fetch failed</i>';
+            }
+            document.getElementById('status').textContent =
+              d.errors.length ? d.errors.join(' | ') : 'Catalogs loaded. Tick models, then Apply.';
+          });
+          function apply(){
+            const sel=[...document.querySelectorAll('input:checked')]
+              .map(i=>({provider:i.dataset.p,id:i.value}));
+            document.getElementById('status').textContent='Applying…';
+            fetch('/api/pool?token='+T,{method:'POST',
+              headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({pool:sel})}).then(r=>r.json()).then(d=>{
+              document.getElementById('status').textContent=
+                '✅ Pool updated ('+d.count+' models). Router restarting ~10s. Run /model in Telegram.';
+            });
+          }
+          </script></body></html>"""
+
+          @app.route("/")
+          def home():
+              return (HTML, 200) if authed() else ("unauthorized", 401)
+
+          @app.route("/api/models")
+          def models():
+              if not authed(): return "unauthorized", 401
+              out = {"ollama": [], "nvidia": [], "errors": [], "pool": load_pool()}
+              for prov, base, keys in [
+                  ("ollama", "https://ollama.com/v1", OLLAMA_KEY_NAMES),
+                  ("nvidia", "https://integrate.api.nvidia.com/v1", NVIDIA_KEY_NAMES)]:
+                  if keys:
+                      try: out[prov] = fetch(base, keys[0])
+                      except Exception as e: out["errors"].append(prov + ": " + str(e))
+              return jsonify(out)
+
+          @app.route("/api/pool", methods=["POST"])
+          def set_pool():
+              if not authed(): return "unauthorized", 401
+              pool = request.get_json()["pool"]
+              json.dump(pool, open(POOL, "w"))
+              write_config(pool)
+              subprocess.run(["docker", "restart", "litellm"], check=False)
+              return jsonify({"ok": True, "count": len(pool)})
+
+          if __name__ == "__main__":
+              if "--init" in sys.argv:
+                  write_config(load_pool()); sys.exit(0)
+              app.run(host="0.0.0.0", port=7000)
+          PYEOF
+
+          # default starting pool (only if no saved pool restored from data repo)
+          if [ ! -f /tmp/pool.json ]; then
+            echo '[{"provider":"ollama","id":"gemma4:31b"}]' > /tmp/pool.json
+          fi
+
+      # ── 6. Start LiteLLM router + panel + tunnel ──
+      - name: Start LiteLLM router and control panel
+        env:
+          PANEL_TOKEN: ${{ secrets.PANEL_TOKEN }}
+          OLLAMA_KEYS: ${{ secrets.OLLAMA_KEYS }}
+          NVIDIA_KEYS: ${{ secrets.NVIDIA_KEYS }}
+        run: |
+          # ── split bulk secrets into numbered env vars ──
+          : > /tmp/litellm.env
+          n=0
+          while IFS= read -r k; do
+            k=$(echo "$k" | tr -d ' \r')
+            [ -z "$k" ] && continue
+            n=$((n+1))
+            echo "OLLAMA_KEY_${n}=${k}" >> /tmp/litellm.env
+          done < <(echo "$OLLAMA_KEYS" | tr ',' '\n')
+          echo "Loaded $n Ollama key(s)"
+
+          n=0
+          while IFS= read -r k; do
+            k=$(echo "$k" | tr -d ' \r')
+            [ -z "$k" ] && continue
+            n=$((n+1))
+            echo "NVIDIA_KEY_${n}=${k}" >> /tmp/litellm.env
+          done < <(echo "$NVIDIA_KEYS" | tr ',' '\n')
+          echo "Loaded $n NVIDIA key(s)"
+
+          # make the split keys visible to this shell + panel process
+          set -a; source /tmp/litellm.env; set +a
+
+          # generate initial litellm config from current pool
+          python3 /tmp/panel/app.py --init
+
+          docker run -d --name litellm --network host \
+            --env-file /tmp/litellm.env \
+            -v /tmp/litellm.yaml:/app/config.yaml \
+            ghcr.io/berriai/litellm:main-latest \
+            --config /app/config.yaml --port 4000
+
+          rm -f /tmp/litellm.env   # keys now live only in container/process env
+
+          # start control panel (inherits this step's env)
+          nohup python3 /tmp/panel/app.py > /tmp/panel.log 2>&1 &
+
+          echo "Waiting for LiteLLM..."
+          for i in $(seq 1 30); do
+            curl -fs http://localhost:4000/v1/models >/dev/null 2>&1 && break
+            sleep 3
+          done
+          curl -fs http://localhost:4000/v1/models || { docker logs litellm; exit 1; }
+
+          # cloudflare quick tunnel for the panel
+          sudo curl -fsSL \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            -o /usr/local/bin/cloudflared
+          sudo chmod +x /usr/local/bin/cloudflared
+          nohup cloudflared tunnel --no-autoupdate --url http://localhost:7000 > /tmp/tunnel.log 2>&1 &
+          URL=""
+          for i in $(seq 1 30); do
+            URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/tunnel.log | head -n1 || true)
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+          if [ -z "$URL" ]; then echo "Tunnel failed"; cat /tmp/tunnel.log; exit 1; fi
+          PANEL_URL="${URL}/?token=${PANEL_TOKEN}"
+          echo "PANEL_URL=$PANEL_URL" >> "$GITHUB_ENV"
+          echo "=================================================="
+          echo "🎛️  MODEL POOL CONTROL PANEL:"
+          echo ""
+          echo "    $PANEL_URL"
+          echo ""
+          echo "=================================================="
+          echo "::notice title=🎛️ Model Pool Panel::$PANEL_URL"
+
+      # ── 7. Write .env ──
       - name: Write .env
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_USER_ID: ${{ secrets.TELEGRAM_USER_ID }}
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           mkdir -p "$HERMES_HOME"
@@ -96,19 +299,20 @@ jobs:
           TELEGRAM_ALLOWED_USERS=${TELEGRAM_USER_ID}
           SEARXNG_URL=http://localhost:8080
           CAMOUFOX_URL=ws://127.0.0.1:9222/hermes
-          NVIDIA_API_KEY=${NVIDIA_API_KEY}
           GROQ_API_KEY=${GROQ_API_KEY}
           EOF
 
-      # ── 6. Configure Hermes (direct NVIDIA endpoint — pick model with /model in Telegram) ──
+      # ── 8. Configure Hermes (points at LiteLLM pool router) ──
       - name: Configure Hermes
         run: |
+          hermes config unset providers.nvidia.base_url || true
+          hermes config unset providers.nvidia.api_key_env || true
           hermes config unset providers.nim.base_url || true
           hermes config unset providers.nim.api_key_env || true
-          hermes config unset model.base_url || true
-          hermes config set model.provider "nvidia"
-          hermes config set providers.nvidia.base_url "https://integrate.api.nvidia.com/v1" || true
-          hermes config set providers.nvidia.api_key_env NVIDIA_API_KEY || true
+          hermes config set model.provider custom
+          hermes config set model.base_url "http://localhost:4000/v1"
+          hermes config set model.api_key "sk-local"
+          hermes config set model.default "gemma4:31b"
           hermes config set web.search_backend searxng
           hermes config set tts.provider edge
           hermes config set toolsets '["terminal","files","web","browser","code","vision","tts","memory","skills","delegation","cron"]'
@@ -116,7 +320,7 @@ jobs:
           echo "── Final model config ──"
           hermes config get model || true
 
-      # ── 7. Background backup loop (every 30 min -> backup branch) ──
+      # ── 9. Background backup loop (every 30 min -> backup branch) ──
       - name: Start backup loop
         env:
           DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
@@ -127,6 +331,7 @@ jobs:
             sleep 1800
             rm -rf /tmp/backup && mkdir -p /tmp/backup
             rsync -a --exclude='.env' --exclude='.git' --exclude='*.log' --exclude='hermes-agent' "$HERMES_HOME/" /tmp/backup/
+            cp /tmp/pool.json /tmp/backup/pool.json 2>/dev/null || true
             cd /tmp/backup
             find . -type f -size +90M | while read -r f; do
               split -b 90M -d -a 3 "$f" "$f.gh-chunk."
@@ -140,9 +345,10 @@ jobs:
           done
           EOF
           chmod +x /tmp/sync.sh
-          HERMES_HOME="$HERMES_HOME" DATA_REPO="$DATA_REPO" DATA_REPO_TOKEN="$DATA_REPO_TOKEN" nohup /tmp/sync.sh > /tmp/sync.log 2>&1 &
+          HERMES_HOME="$HERMES_HOME" DATA_REPO="$DATA_REPO" DATA_REPO_TOKEN="$DATA_REPO_TOKEN" \
+            nohup /tmp/sync.sh > /tmp/sync.log 2>&1 &
 
-      # ── 8. Notify start on Telegram ──
+      # ── 10. Notify start on Telegram (includes panel link) ──
       - name: Notify start
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -151,9 +357,11 @@ jobs:
           TG_API="https://api.telegram.org"
           curl -s -X POST "${TG_API}/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_USER_ID}" \
-            -d text="🟢 Hermes Agent ONLINE — use /model in Telegram to pick an NVIDIA model" > /dev/null
+            -d text="🟢 Hermes Agent ONLINE
+          🎛️ Model pool panel: ${PANEL_URL}
+          Use /model in Telegram to pick from the pool" > /dev/null
 
-      # ── 9. Run gateway with time budget ──
+      # ── 11. Run gateway with time budget ──
       - name: Run Hermes gateway
         run: |
           JOB_START=$(cat /tmp/job_start)
@@ -170,7 +378,7 @@ jobs:
             sleep 10
           done
 
-      # ── 10. Final push to data repo (main) ──
+      # ── 12. Final push to data repo (main) ──
       - name: Final data push
         if: always()
         env:
@@ -178,6 +386,7 @@ jobs:
         run: |
           rm -rf /tmp/final && mkdir -p /tmp/final
           rsync -a --exclude='.env' --exclude='.git' --exclude='*.log' --exclude='hermes-agent' "$HERMES_HOME/" /tmp/final/ || true
+          cp /tmp/pool.json /tmp/final/pool.json 2>/dev/null || true
           cd /tmp/final
           find . -type f -size +90M | while read -r f; do
             split -b 90M -d -a 3 "$f" "$f.gh-chunk."
@@ -192,7 +401,7 @@ jobs:
           git add -A && git commit -q -m "final save $(date -u +%FT%TZ)" || true
           git push -f "https://x-access-token:${DATA_REPO_TOKEN}@github.com/${DATA_REPO}.git" main
 
-      # ── 11. Notify failure ──
+      # ── 13. Notify failure ──
       - name: Notify failure
         if: failure()
         env:

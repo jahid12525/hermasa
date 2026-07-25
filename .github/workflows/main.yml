@@ -286,11 +286,12 @@ jobs:
           }
           function applyPool(){
             const sel=[...pool].map(m=>({provider:'nvidia',id:m}));
+            if(!sel.length)return toast('Select at least 1 model',true);
             toast('Applying pool…');
             fetch('/api/pool',{method:'POST',
               headers:{'Content-Type':'application/json'},
               body:JSON.stringify({pool:sel})}).then(r=>r.json())
-              .then(d=>toast('✅ Pool saved ('+d.count+'). Router restarting ~10s. Synced to backup repo. Run /model in Telegram.'))
+              .then(d=>toast('✅ Pool saved ('+d.count+'). Router restarting ~10s. Run /model in Telegram to switch.'))
               .catch(e=>toast('Failed: '+e,true));
           }
           </script></body></html>"""
@@ -359,6 +360,8 @@ jobs:
           def set_pool():
               if not authed(): return deny()
               pool = [x for x in request.get_json()["pool"] if x.get("provider") == "nvidia"]
+              if not pool:
+                  return jsonify({"ok": False, "count": 0})
               save_pool(pool)
               write_config(pool)
               # fire-and-forget restart: respond immediately, don't block the request
@@ -500,7 +503,7 @@ jobs:
           EOF
           echo "Agent instructions written to $HOME/AGENTS.md"
 
-      # ── 9. Configure Hermes (points at LiteLLM pool router) ──
+      # ── 9. Configure Hermes (default model comes FROM YOUR POOL) ──
       - name: Configure Hermes
         run: |
           hermes config unset providers.nvidia.base_url || true
@@ -510,7 +513,10 @@ jobs:
           hermes config set model.provider custom
           hermes config set model.base_url "http://localhost:4000/v1"
           hermes config set model.api_key "sk-local"
-          hermes config set model.default "meta/llama-3.3-70b-instruct"
+          # ★ FIX: default model = first model in YOUR saved pool (not hardcoded)
+          DEFAULT_MODEL=$(python3 -c "import json; print(json.load(open('$HERMES_HOME/pool.json'))[0]['id'])")
+          echo "Default model from pool: $DEFAULT_MODEL"
+          hermes config set model.default "$DEFAULT_MODEL"
           hermes config set model.context_length 65536
           hermes config set web.search_backend searxng
           hermes config set tts.provider edge

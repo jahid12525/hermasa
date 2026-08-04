@@ -391,7 +391,7 @@ jobs:
                        "justify-content:center;height:100vh;text-align:center'>"
                        "<div><h1>&%23128058; Camofox is awake</h1>"
                        "<p>This placeholder tab keeps the browser alive.<br>"
-                       "Agent windows open ON TOP of this one.<br>"
+                       "The agent browses in tabs of this SAME window, with your logins.<br>"
                        "To log in yourself: use the agent's window, or open a new tab"
                        " with the %2B button - do NOT use this tab.</p></div></body>")
 
@@ -1254,7 +1254,19 @@ jobs:
           # through the anti-detect server (flag written in step 4 on success)
           if [ -f /tmp/camofox_url ]; then
             echo "CAMOFOX_URL=$(cat /tmp/camofox_url)" >> "$HERMES_HOME/.env"
-            echo "CAMOFOX_URL set - built-in browsing is anti-detect"
+            # fix48: pin built-in browser tools to the SAME Camofox identity
+            # the user watches + logs into (the keepalive placeholder
+            # session "boss-view"). Hermes docs "Externally managed Camofox
+            # sessions": setting user_id makes Hermes share that window,
+            # profile and cookie jar, skip destructive cleanup and never
+            # DELETE the session. Without it Hermes invents a RANDOM
+            # ephemeral userId per task = fresh logged-out WINDOW each time
+            # (the "multiple windows" + "ignores my logins" complaints).
+            # session_key stays UNSET on purpose: Hermes opens its OWN tab
+            # per task instead of adopting the placeholder tab, so the
+            # keepalive's 2-min refresh never reloads the agent's page.
+            echo "CAMOFOX_USER_ID=boss-view" >> "$HERMES_HOME/.env"
+            echo "CAMOFOX_URL set - built-in browsing is anti-detect (shared boss-view session)"
           fi
 
       # ── 8. Standing instructions for the agent (auto save-to-file) ──
@@ -1320,8 +1332,17 @@ jobs:
             the user watches and controls it via the dedicated "Camofox
             browser" noVNC link from the start message. A keepalive keeps
             the engine awake with a placeholder tab under userId
-            "boss-view" - NEVER close that tab or its session; your own
-            windows open on top of it. The user can take the
+            "boss-view" - NEVER close that tab or its session. Your browser
+            tools are PINNED to that SAME identity (CAMOFOX_USER_ID
+            boss-view): every tab you open lives in the user's ONE Camofox
+            window, sharing ONE profile and ONE cookie jar with their tabs,
+            so their logins (Facebook etc.) are ALREADY yours. USE YOUR
+            BUILT-IN browser_* TOOLS BY DEFAULT for EVERY website task -
+            visiting, logging in, posting, scraping, forms - never ask the
+            user which browser to use and never open a separate browser for
+            a job the built-in tools can do. When a task is done, CLOSE the
+            tabs you opened - but NEVER the placeholder tab or tabs the
+            user is using. The user can take the
             mouse there to
             log into accounts, solve captchas or step in - then you continue
             in that SAME browser with their logged-in session. Logins persist
@@ -1330,7 +1351,9 @@ jobs:
             and KEEP it open (the window closes when no tabs are open), ASK
             the user to log in via the Camofox browser link, wait for their
             confirmation, then continue.
-            When you write your OWN browser scripts, connect
+            Writing your OWN browser scripts is a LAST RESORT for jobs the
+            built-in tools truly cannot do - that is a DIFFERENT browser
+            with NONE of the user's logins. If you must: connect
             playwright/camoufox to ws://127.0.0.1:9222/hermes or ALWAYS pass
             headless=False - NEVER headless=True or headless='virtual' - so
             windows show on the shared display :99 (the main live desktop -
@@ -1444,7 +1467,10 @@ jobs:
           # came up (CAMOFOX_URL in .env routes ALL browser_* tools through
           # it). Otherwise fall back to the visible Chrome over CDP.
           if [ -f /tmp/camofox_url ]; then
-            echo "Built-in browser tools: Camofox anti-detect (no CDP beacons)"
+            # fix48: same shared identity in config.yaml too (the .env var
+            # takes precedence; this covers direct hermes runs/doctor)
+            hermes config set browser.camofox.user_id boss-view
+            echo "Built-in browser tools: Camofox anti-detect (no CDP beacons) - shared boss-view session"
           else
             hermes config set browser.cdp_url "http://127.0.0.1:9223"
             echo "Built-in browser tools: visible Chrome fallback (CDP :9223)"
@@ -3350,7 +3376,7 @@ jobs:
           📊 Dashboard: ${DASHBOARD_URL:-not available} (user: boss)
           ⏱ Run length: ${RUN_HOURS_INPUT:-5.5} hours
           🔭 Live desktop: ${LIVEVIEW_URL:-not available} (agent GUI + fallback Chrome - FULL control - pass: first 8 chars of PANEL_TOKEN)
-          🦊 Camofox browser: ${BROWSERVIEW_URL:-not available} (the agent's ACTUAL browser - log into your accounts HERE, logins are saved - placeholder tab keeps it awake, agent windows open on top - brief black screen/disconnect = engine restarting, self-heals in ~1 min - same pass)
+          🦊 Camofox browser: ${BROWSERVIEW_URL:-not available} (the agent's ACTUAL browser - log into your accounts HERE, logins are saved - the agent works in THIS same window and sees your logins (placeholder tab keeps it awake) - brief black screen/disconnect = engine restarting, self-heals in ~1 min - same pass)
           🔑 Password: your PANEL_TOKEN secret
           Use /model in Telegram or !model in Slack to switch models")
           case "$TG_RESP" in

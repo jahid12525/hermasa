@@ -268,7 +268,10 @@ jobs:
             echo "Running services:"
             pgrep -a -f 'hermes|camoufox|litellm|searxng|cloudflared' | cut -c1-105
             echo
-            echo "Browser windows appear here when the agent works..."
+            echo "NOTE: the Camofox browser is NOT on this desktop!"
+            echo "Open the 'Camofox browser' link from the Telegram start"
+            echo "message to watch/control it (noVNC :6081, same password)."
+            echo "Here you only see: fallback Chrome + your own script windows."
             sleep 2
           done
           EOF

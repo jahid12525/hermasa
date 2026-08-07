@@ -3327,6 +3327,1209 @@ jobs:
           curl -fs http://127.0.0.1:7777/ >/dev/null 2>&1 || { echo '::warning::voice reply service failed to start'; cat /tmp/jarvis.log; }
           echo "Voice reply service running locally on 127.0.0.1:7777 (powers Telegram/Slack voice + inline file delivery). Jarvis web panel removed - no public tunnel."
 
+      # ------------------------------------------------------------------
+      # Live voice calls between the Agent Ai app user and Hermes itself.
+      # The app publishes an invite at hermesCalls/{botId}; this bridge joins
+      # the same WebRTC room, listens (Groq Whisper), asks Hermes, and speaks
+      # the answer back with edge-tts. Real two-way conversation, no fees.
+      # ------------------------------------------------------------------
+      - name: Start Hermes live voice call bridge
+        continue-on-error: true
+        env:
+          HERMES_DB_URL: ${{ secrets.AGENT_AI_DB_URL || 'https://shawall-default-rtdb.firebaseio.com' }}
+          HERMES_DB_TOKEN: ${{ secrets.AGENT_AI_DB_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          HERMES_AGENT_NAME: Hermes
+          HERMES_TTS_VOICE: en-US-AriaNeural
+          HERMES_CHAT_CMD: hermes chat -q
+          HERMES_POOL_URL: http://localhost:4000/v1
+          HERMES_POOL_MODEL: pool-auto
+        run: |
+          set +e
+          echo "Installing WebRTC bridge dependencies..."
+          python3 -m pip install --quiet --upgrade aiortc av requests >/tmp/aiortc-install.log 2>&1 || \
+            echo "::warning::aiortc install failed - live voice calls disabled"
+          command -v ffmpeg >/dev/null 2>&1 || sudo apt-get install -y -qq ffmpeg >/dev/null 2>&1
+
+          sed 's/^          //' > "$HERMES_HOME/hermes_live_call.py" <<'HERMESCALLEOF'
+          #!/usr/bin/env python3
+          """
+          Hermes live voice call bridge
+          =============================
+
+          Makes the Hermes agent joinable as a real participant in an Agent Ai voice
+          call, so the user can *talk* to Hermes and hear it answer, live.
+
+          How it fits together
+          --------------------
+          1. In the app the user opens a bot chat and taps the call button. The app
+             creates a WebRTC room and publishes an invite:
+
+                 hermesCalls/{botId} = {roomId, botId, userId, userName, status, createdAt}
+
+          2. This bridge polls that node. When an invite appears it joins the very same
+             room using the app's existing Firebase signalling layout:
+
+                 rtc/{roomId}/participants/{id}          {id, name, avatar, joinedAt}
+                 rtc/{roomId}/links/{a}__{b}/offer       written by the lower id
+                 rtc/{roomId}/links/{a}__{b}/answer      written by the higher id
+                 rtc/{roomId}/links/{a}__{b}/cand_{id}/  trickle ICE candidates
+                 rtc/{roomId}/state                      accepted | declined | ended
+
+          3. Inbound Opus audio -> 16 kHz PCM -> Groq Whisper (speech to text).
+          4. The transcript goes to Hermes (`hermes chat -q`, or the local model pool).
+          5. The answer goes through edge-tts -> 48 kHz PCM -> back into the call.
+
+          Requirements
+          ------------
+              pip install aiortc av requests
+              ffmpeg and edge-tts on PATH (both already present in the Hermes workflow)
+
+          Environment
+          -----------
+              HERMES_DB_URL     Firebase Realtime Database URL (same one the app uses)
+              HERMES_DB_TOKEN   optional ?auth= token when your rules require it
+              HERMES_AGENT_NAME display name shown in the call        (default "Hermes")
+              GROQ_API_KEY      speech to text
+              HERMES_STT_MODEL  default whisper-large-v3-turbo
+              HERMES_TTS_VOICE  default en-US-AriaNeural
+              HERMES_CHAT_CMD   default "hermes chat -q"
+              HERMES_POOL_URL   fallback chat endpoint (default http://localhost:4000/v1)
+              HERMES_POOL_MODEL default pool-auto
+          """
+
+          import argparse
+          import asyncio
+          import audioop
+          import fractions
+          import io
+          import json
+          import threading
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          import os
+          import shlex
+          import subprocess
+          import sys
+          import time
+          import uuid
+          import re
+          import wave
+          from datetime import datetime, timedelta
+          try:
+              from zoneinfo import ZoneInfo
+          except Exception:  # pragma: no cover - very old python
+              ZoneInfo = None
+
+          import av
+          import requests
+          from aiortc import (
+              RTCConfiguration,
+              RTCIceServer,
+              RTCPeerConnection,
+              RTCSessionDescription,
+              MediaStreamTrack,
+          )
+          from aiortc.sdp import candidate_from_sdp
+
+          # --------------------------------------------------------------------------
+          # configuration
+          # --------------------------------------------------------------------------
+
+          DB_URL = os.environ.get("HERMES_DB_URL", "https://shawall-default-rtdb.firebaseio.com").rstrip("/")
+          DB_TOKEN = os.environ.get("HERMES_DB_TOKEN", "").strip()
+          AGENT_NAME = os.environ.get("HERMES_AGENT_NAME", "Hermes")
+          GROQ_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+          STT_MODEL = os.environ.get("HERMES_STT_MODEL", "whisper-large-v3-turbo")
+          TTS_VOICE = os.environ.get("HERMES_TTS_VOICE", "en-US-AriaNeural")
+          CHAT_CMD = os.environ.get("HERMES_CHAT_CMD", "hermes chat -q")
+          POOL_URL = os.environ.get("HERMES_POOL_URL", "http://localhost:4000/v1").rstrip("/")
+          POOL_MODEL = os.environ.get("HERMES_POOL_MODEL", "pool-auto")
+
+          GREETING = os.environ.get(
+              "HERMES_GREETING",
+              "Hermes here. I am listening, go ahead.",
+          )
+
+          SAMPLE_RATE = 48000          # what WebRTC carries
+          STT_RATE = 16000             # what Whisper wants
+          FRAME_SAMPLES = 960          # 20 ms at 48 kHz
+          SILENCE_RMS = 500            # below this counts as silence
+          MIN_SPEECH_MS = 400          # ignore coughs and clicks
+          END_SILENCE_MS = 900         # this much silence ends an utterance
+          MAX_UTTERANCE_MS = 25000     # hard stop so we always answer something
+          RING_TIMEOUT_S = 45          # how long we let the phone ring
+          CONTROL_PORT = int(os.environ.get("HERMES_CALL_PORT", "7788"))
+          LOCAL_TZ = os.environ.get("HERMES_TZ", "Asia/Dhaka")
+          # If the runner was asleep when a call was due, still make it this many
+          # minutes late rather than silently dropping it.
+          LATE_GRACE_MIN = int(os.environ.get("HERMES_LATE_GRACE_MIN", "180"))
+
+          # Outgoing call requests picked up from the control port or the database.
+          PENDING = []
+          PENDING_LOCK = threading.Lock()
+
+          ICE = RTCConfiguration([
+              RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
+              RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
+              RTCIceServer(urls=["stun:stun2.l.google.com:19302"]),
+          ])
+
+
+          def log(*parts):
+              print("[hermes-call]", *parts, flush=True)
+
+
+          # --------------------------------------------------------------------------
+          # Firebase Realtime Database REST helpers (same transport the app uses)
+          # --------------------------------------------------------------------------
+
+
+          def _url(path):
+              url = "%s/%s.json" % (DB_URL, path.strip("/"))
+              if DB_TOKEN:
+                  url += "?auth=%s" % DB_TOKEN
+              return url
+
+
+          def db_get(path):
+              try:
+                  r = requests.get(_url(path), timeout=15)
+                  if r.status_code != 200:
+                      return None
+                  body = r.text.strip()
+                  if not body or body == "null":
+                      return None
+                  return json.loads(body)
+              except Exception as exc:
+                  log("db_get failed", path, exc)
+                  return None
+
+
+          def db_put(path, value):
+              try:
+                  requests.put(_url(path), data=json.dumps(value), timeout=15)
+                  return True
+              except Exception as exc:
+                  log("db_put failed", path, exc)
+                  return False
+
+
+          def db_delete(path):
+              try:
+                  requests.delete(_url(path), timeout=15)
+                  return True
+              except Exception:
+                  return False
+
+
+          # --------------------------------------------------------------------------
+          # placing a call *to* the user (Hermes rings the phone)
+          # --------------------------------------------------------------------------
+
+
+          def tz():
+              if ZoneInfo is None:
+                  return None
+              try:
+                  return ZoneInfo(LOCAL_TZ)
+              except Exception:
+                  return None
+
+
+          def now_local():
+              return datetime.now(tz())
+
+
+          WEEKDAYS = {
+              "monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "wednesday": 2, "wed": 2,
+              "thursday": 3, "thu": 3, "friday": 4, "fri": 4, "saturday": 5, "sat": 5,
+              "sunday": 6, "sun": 6,
+          }
+
+
+          def _apply_time(base, hour, minute):
+              return base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+          def _find_clock(text):
+              """Pulls a time of day out of free text. Returns (hour, minute) or None."""
+              m = re.search(r"(\d{1,2})[:.](\d{2})\s*(am|pm)?", text)
+              if m:
+                  hour = int(m.group(1))
+                  minute = int(m.group(2))
+                  suffix = m.group(3)
+              else:
+                  m = re.search(r"(\d{1,2})\s*(am|pm)", text)
+                  if not m:
+                      return None
+                  hour = int(m.group(1))
+                  minute = 0
+                  suffix = m.group(2)
+              if suffix == "pm" and hour < 12:
+                  hour += 12
+              if suffix == "am" and hour == 12:
+                  hour = 0
+              if hour > 23 or minute > 59:
+                  return None
+              return hour, minute
+
+
+          def parse_when(value):
+              """
+              Turns whatever the user said into an epoch-millisecond timestamp.
+
+              Understands: epoch millis, ISO timestamps, "tomorrow 10am",
+              "today at 21:30", "in 45 minutes", "in 2 hours", "monday 9am",
+              "2026-08-08 10:00" and a bare "10am" (meaning the next 10am).
+              """
+              if value is None:
+                  return None
+              if isinstance(value, (int, float)):
+                  return int(value if value > 1e12 else value * 1000)
+
+              text = str(value).strip().lower()
+              if not text:
+                  return None
+              if text.isdigit():
+                  n = int(text)
+                  return n if n > 1e12 else n * 1000
+
+              base = now_local()
+
+              # "in 20 minutes" / "in 3 hours" / "in 2 days"
+              m = re.search(r"in\s+(\d+)\s*(min|minute|minutes|hour|hours|hr|day|days)", text)
+              if m:
+                  amount = int(m.group(1))
+                  unit = m.group(2)
+                  if unit.startswith("min"):
+                      target = base + timedelta(minutes=amount)
+                  elif unit.startswith(("hour", "hr")):
+                      target = base + timedelta(hours=amount)
+                  else:
+                      target = base + timedelta(days=amount)
+                  return int(target.timestamp() * 1000)
+
+              # ISO first - most precise when the agent formats it properly.
+              iso = text.replace("z", "").strip()
+              for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dt%H:%M:%S", "%Y-%m-%d %H:%M",
+                          "%Y-%m-%dt%H:%M", "%Y-%m-%d", "%d-%m-%Y %H:%M", "%d/%m/%Y %H:%M"):
+                  try:
+                      parsed = datetime.strptime(iso, fmt)
+                      if tz() is not None:
+                          parsed = parsed.replace(tzinfo=tz())
+                      if fmt == "%Y-%m-%d":
+                          clock = _find_clock(text) or (9, 0)
+                          parsed = _apply_time(parsed, clock[0], clock[1])
+                      return int(parsed.timestamp() * 1000)
+                  except ValueError:
+                      continue
+
+              clock = _find_clock(text)
+              hour, minute = clock if clock else (9, 0)
+
+              if "day after tomorrow" in text:
+                  target = _apply_time(base + timedelta(days=2), hour, minute)
+              elif "tomorrow" in text or "kal" in text or "agamikal" in text:
+                  target = _apply_time(base + timedelta(days=1), hour, minute)
+              elif "tonight" in text:
+                  target = _apply_time(base, hour if clock else 21, minute)
+              elif "today" in text or "aaj" in text:
+                  target = _apply_time(base, hour, minute)
+              else:
+                  weekday = None
+                  for name, index in WEEKDAYS.items():
+                      if re.search(r"\b%s\b" % name, text):
+                          weekday = index
+                          break
+                  if weekday is not None:
+                      ahead = (weekday - base.weekday()) % 7
+                      if ahead == 0:
+                          ahead = 7
+                      target = _apply_time(base + timedelta(days=ahead), hour, minute)
+                  elif clock:
+                      target = _apply_time(base, hour, minute)
+                      if target <= base:
+                          target += timedelta(days=1)
+                  else:
+                      return None
+
+              if target <= base and "today" not in text and "tonight" not in text:
+                  # A time that already passed today means the next day.
+                  if "tomorrow" not in text and "kal" not in text:
+                      target += timedelta(days=1)
+              return int(target.timestamp() * 1000)
+
+
+          def pretty_time(epoch_ms):
+              try:
+                  return datetime.fromtimestamp(epoch_ms / 1000.0, tz()).strftime(
+                      "%a %d %b %Y, %I:%M %p"
+                  )
+              except Exception:
+                  return str(epoch_ms)
+
+
+          def schedule_call(user_id, when, say="", topic="", repeat="once", bot_id=None):
+              """Stores a future call so it survives runner restarts."""
+              at = parse_when(when)
+              if not user_id or at is None:
+                  return None
+              entry = {
+                  "id": "sch_%s" % uuid.uuid4().hex[:8],
+                  "userId": user_id,
+                  "at": at,
+                  "say": say or "",
+                  "topic": topic or "",
+                  "repeat": (repeat or "once").lower(),
+                  "botId": bot_id or os.environ.get("HERMES_BOT_ID", "hermes"),
+                  "status": "pending",
+                  "attempts": 0,
+                  "createdAt": int(time.time() * 1000),
+                  "humanTime": pretty_time(at),
+              }
+              if db_put("hermesSchedule/%s" % entry["id"], entry):
+                  log("scheduled call", entry["id"], "for", entry["humanTime"])
+                  return entry
+              return None
+
+
+          def list_schedule():
+              items = db_get("hermesSchedule") or {}
+              out = [v for v in items.values() if isinstance(v, dict)]
+              return sorted(out, key=lambda x: x.get("at", 0))
+
+
+          def cancel_schedule(entry_id):
+              if not entry_id:
+                  return False
+              if entry_id in ("all", "*"):
+                  for item in list_schedule():
+                      db_delete("hermesSchedule/%s" % item.get("id"))
+                  return True
+              return db_delete("hermesSchedule/%s" % entry_id)
+
+
+          def due_schedules():
+              """Returns the entries that should be called right now."""
+              now_ms = int(time.time() * 1000)
+              ready = []
+              for item in list_schedule():
+                  if item.get("status") != "pending":
+                      continue
+                  at = item.get("at", 0)
+                  if at > now_ms:
+                      continue
+                  late_min = (now_ms - at) / 60000.0
+                  if late_min > LATE_GRACE_MIN:
+                      # The runner was down for too long; do not surprise the user with
+                      # a call hours after the fact - just mark it and move on.
+                      item["status"] = "missed"
+                      db_put("hermesSchedule/%s" % item["id"], item)
+                      log("schedule missed by", int(late_min), "minutes:", item["id"])
+                      continue
+                  ready.append(item)
+              return ready
+
+
+          def complete_schedule(item, outcome):
+              """Marks a schedule done, or rolls it forward when it repeats."""
+              repeat = (item.get("repeat") or "once").lower()
+              if repeat in ("daily", "weekly", "weekday") and outcome != "cancelled":
+                  step = timedelta(days=1) if repeat != "weekly" else timedelta(days=7)
+                  nxt = datetime.fromtimestamp(item["at"] / 1000.0, tz()) + step
+                  if repeat == "weekday":
+                      while nxt.weekday() >= 5:
+                          nxt += timedelta(days=1)
+                  item["at"] = int(nxt.timestamp() * 1000)
+                  item["humanTime"] = pretty_time(item["at"])
+                  item["status"] = "pending"
+                  item["attempts"] = 0
+                  db_put("hermesSchedule/%s" % item["id"], item)
+                  log("repeating call moved to", item["humanTime"])
+                  return
+              item["status"] = outcome
+              item["completedAt"] = int(time.time() * 1000)
+              db_put("hermesSchedule/%s" % item["id"], item)
+
+
+          def new_room_id():
+              return "room_%s" % uuid.uuid4().hex[:12]
+
+
+          def ring_user(user_id, room_id, bot_id, bot_name):
+              """
+              Writes the ring node the app is already listening on, exactly in the shape
+              of the app's CallSession model. callType VOICE plus a roomId is what makes
+              the phone open the real live call screen instead of a TTS playback.
+              """
+              session = {
+                  "callId": "call_%s" % uuid.uuid4().hex[:8],
+                  "callerId": bot_id,
+                  "callerName": bot_name,
+                  "callerAvatar": "",
+                  "recipientId": user_id,
+                  "callType": "VOICE",
+                  "status": "RINGING",
+                  "ttsText": "",
+                  "ttsAudioUrl": "",
+                  "ttsAudioBase64": "",
+                  "timestamp": int(time.time() * 1000),
+                  "durationSeconds": 0,
+                  "roomId": room_id,
+                  "groupId": "",
+                  "groupName": "",
+              }
+              db_delete("calls/%s" % user_id)
+              return db_put("calls/%s" % user_id, session)
+
+
+          def queue_outgoing(user_id, say="", bot_id=None, bot_name=None, topic=""):
+              """Adds an outgoing call request to the queue the main loop drains."""
+              if not user_id:
+                  return False
+              with PENDING_LOCK:
+                  PENDING.append({
+                      "userId": user_id,
+                      "say": say or "",
+                      "botId": bot_id or os.environ.get("HERMES_BOT_ID", "hermes"),
+                      "botName": bot_name or AGENT_NAME,
+                      "topic": topic or "",
+                      "outgoing": True,
+                  })
+              return True
+
+
+          class ControlHandler(BaseHTTPRequestHandler):
+              """
+              Tiny local endpoint so Hermes itself can start a call with one curl:
+
+                  curl -X POST http://localhost:7788/call \
+                       -d '{"user":"USER_ID","say":"Your build finished"}'
+              """
+
+              def _reply(self, code, payload):
+                  body = json.dumps(payload).encode()
+                  self.send_response(code)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("Content-Length", str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+
+              def do_GET(self):
+                  if self.path.startswith("/schedules"):
+                      self._reply(200, {"ok": True, "schedules": list_schedule()})
+                      return
+                  self._reply(200, {"ok": True, "service": "hermes-live-call"})
+
+              def do_POST(self):
+                  try:
+                      length = int(self.headers.get("Content-Length", 0))
+                      raw = self.rfile.read(length).decode() if length else "{}"
+                      try:
+                          data = json.loads(raw)
+                      except Exception:
+                          # Also accept plain form style: user=...&say=...
+                          data = dict(
+                              part.split("=", 1) for part in raw.split("&") if "=" in part
+                          )
+                      user = data.get("user") or data.get("userId") or ""
+                      say = data.get("say") or data.get("text") or ""
+                      topic = data.get("topic") or data.get("about") or ""
+
+                      # ---- cancel a scheduled call --------------------------------
+                      if self.path.startswith("/cancel"):
+                          target = data.get("id") or data.get("schedule") or ""
+                          ok = cancel_schedule(target)
+                          self._reply(200 if ok else 400, {"ok": ok, "cancelled": target})
+                          return
+
+                      # ---- book a call for later ----------------------------------
+                      if self.path.startswith("/schedule"):
+                          when = data.get("when") or data.get("at") or data.get("time") or ""
+                          entry = schedule_call(
+                              user,
+                              when,
+                              say,
+                              topic,
+                              data.get("repeat", "once"),
+                              data.get("botId"),
+                          )
+                          if entry is None:
+                              self._reply(400, {
+                                  "ok": False,
+                                  "error": "could not understand the time or user id",
+                                  "got": {"user": user, "when": when},
+                              })
+                          else:
+                              self._reply(200, {
+                                  "ok": True,
+                                  "id": entry["id"],
+                                  "at": entry["at"],
+                                  "humanTime": entry["humanTime"],
+                              })
+                          return
+
+                      # ---- ring right now -----------------------------------------
+                      ok = queue_outgoing(
+                          user,
+                          say,
+                          data.get("botId"),
+                          data.get("botName"),
+                          topic,
+                      )
+                      log("outgoing call requested for", user)
+                      self._reply(200 if ok else 400, {"ok": ok, "user": user})
+                  except Exception as exc:
+                      self._reply(500, {"ok": False, "error": str(exc)})
+
+              def log_message(self, *args):
+                  pass
+
+
+          def start_control_server():
+              try:
+                  server = HTTPServer(("127.0.0.1", CONTROL_PORT), ControlHandler)
+              except Exception as exc:
+                  log("control port unavailable", exc)
+                  return
+              threading.Thread(target=server.serve_forever, daemon=True).start()
+              log("control endpoint on http://127.0.0.1:%d/call" % CONTROL_PORT)
+
+
+          # --------------------------------------------------------------------------
+          # speech to text / text to speech / talking to Hermes
+          # --------------------------------------------------------------------------
+
+
+          def pcm_to_wav(pcm16, rate=STT_RATE):
+              buf = io.BytesIO()
+              with wave.open(buf, "wb") as w:
+                  w.setnchannels(1)
+                  w.setsampwidth(2)
+                  w.setframerate(rate)
+                  w.writeframes(pcm16)
+              return buf.getvalue()
+
+
+          def transcribe(pcm16):
+              """Groq Whisper. Returns the recognised text, or an empty string."""
+              if not GROQ_KEY:
+                  log("no GROQ_API_KEY - cannot transcribe")
+                  return ""
+              wav = pcm_to_wav(pcm16)
+              try:
+                  r = requests.post(
+                      "https://api.groq.com/openai/v1/audio/transcriptions",
+                      headers={"Authorization": "Bearer %s" % GROQ_KEY},
+                      files={"file": ("speech.wav", wav, "audio/wav")},
+                      data={"model": STT_MODEL, "response_format": "json"},
+                      timeout=90,
+                  )
+                  if r.status_code != 200:
+                      log("stt http", r.status_code, r.text[:200])
+                      return ""
+                  return (r.json().get("text") or "").strip()
+              except Exception as exc:
+                  log("stt failed", exc)
+                  return ""
+
+
+          def ask_hermes(text, user_name, topic=""):
+              """Send the user's words to Hermes and return the spoken answer."""
+              about = (
+                  " This call was booked to talk about: %s." % topic if topic else ""
+              )
+              prompt = (
+                  "You are on a live phone call with %s.%s Answer in a natural, spoken "
+                  "style, at most three short sentences, no markdown, no lists, no "
+                  "emoji. The caller said: %s" % (user_name or "the user", about, text)
+              )
+              # 1) the real Hermes CLI
+              try:
+                  cmd = shlex.split(CHAT_CMD) + [prompt]
+                  out = subprocess.run(
+                      cmd, capture_output=True, text=True, timeout=120
+                  )
+                  answer = (out.stdout or "").strip()
+                  if answer:
+                      return answer
+                  log("hermes cli empty", (out.stderr or "")[:200])
+              except Exception as exc:
+                  log("hermes cli failed", exc)
+              # 2) the local model pool router the workflow already runs
+              try:
+                  r = requests.post(
+                      "%s/chat/completions" % POOL_URL,
+                      json={
+                          "model": POOL_MODEL,
+                          "messages": [{"role": "user", "content": prompt}],
+                          "max_tokens": 300,
+                      },
+                      timeout=120,
+                  )
+                  if r.status_code == 200:
+                      return r.json()["choices"][0]["message"]["content"].strip()
+                  log("pool http", r.status_code, r.text[:200])
+              except Exception as exc:
+                  log("pool failed", exc)
+              return "Sorry, I could not reach my brain just now."
+
+
+          def synthesize(text):
+              """edge-tts -> 48 kHz mono signed 16 bit PCM ready for WebRTC."""
+              if not text:
+                  return b""
+              mp3 = "/tmp/hermes_call_%s.mp3" % uuid.uuid4().hex[:8]
+              try:
+                  subprocess.run(
+                      ["edge-tts", "--voice", TTS_VOICE, "--text", text, "--write-media", mp3],
+                      capture_output=True,
+                      timeout=120,
+                  )
+                  if not os.path.exists(mp3) or os.path.getsize(mp3) == 0:
+                      return b""
+                  out = subprocess.run(
+                      [
+                          "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", mp3,
+                          "-f", "s16le", "-acodec", "pcm_s16le",
+                          "-ar", str(SAMPLE_RATE), "-ac", "1", "-",
+                      ],
+                      capture_output=True,
+                      timeout=120,
+                  )
+                  return out.stdout or b""
+              except Exception as exc:
+                  log("tts failed", exc)
+                  return b""
+              finally:
+                  try:
+                      os.remove(mp3)
+                  except Exception:
+                      pass
+
+
+          # --------------------------------------------------------------------------
+          # outbound audio track: whatever we push into it is what the user hears
+          # --------------------------------------------------------------------------
+
+
+          class HermesVoiceTrack(MediaStreamTrack):
+              kind = "audio"
+
+              def __init__(self):
+                  super().__init__()
+                  self._queue = bytearray()
+                  self._lock = asyncio.Lock()
+                  self._pts = 0
+                  self._start = None
+
+              async def say(self, pcm16):
+                  async with self._lock:
+                      self._queue.extend(pcm16)
+
+              async def stop_speaking(self):
+                  async with self._lock:
+                      self._queue.clear()
+
+              @property
+              def speaking(self):
+                  return len(self._queue) > 0
+
+              async def recv(self):
+                  if self._start is None:
+                      self._start = time.time()
+                  self._pts += FRAME_SAMPLES
+                  target = self._start + self._pts / float(SAMPLE_RATE)
+                  wait = target - time.time()
+                  if wait > 0:
+                      await asyncio.sleep(wait)
+
+                  need = FRAME_SAMPLES * 2
+                  async with self._lock:
+                      if len(self._queue) >= need:
+                          chunk = bytes(self._queue[:need])
+                          del self._queue[:need]
+                      else:
+                          chunk = bytes(self._queue) + b"\x00" * (need - len(self._queue))
+                          self._queue.clear()
+
+                  frame = av.AudioFrame(format="s16", layout="mono", samples=FRAME_SAMPLES)
+                  frame.planes[0].update(chunk)
+                  frame.sample_rate = SAMPLE_RATE
+                  frame.pts = self._pts - FRAME_SAMPLES
+                  frame.time_base = fractions.Fraction(1, SAMPLE_RATE)
+                  return frame
+
+
+          # --------------------------------------------------------------------------
+          # one call
+          # --------------------------------------------------------------------------
+
+
+          class HermesCall:
+              def __init__(self, invite):
+                  self.room = invite["roomId"]
+                  self.bot_id = invite.get("botId") or "hermes"
+                  self.user_id = invite.get("userId") or ""
+                  self.user_name = invite.get("userName") or "there"
+                  self.self_id = "hermes_%s" % self.bot_id
+                  self.pair = (
+                      "%s__%s" % (self.self_id, self.user_id)
+                      if self.self_id < self.user_id
+                      else "%s__%s" % (self.user_id, self.self_id)
+                  )
+                  self.am_offerer = self.self_id < self.user_id
+                  self.pc = None
+                  self.voice = HermesVoiceTrack()
+                  self.done = asyncio.Event()
+                  self.remote_set = False
+                  self.cand_index = 0
+                  self.seen_candidates = set()
+                  # True when Hermes is the one placing the call.
+                  self.outgoing = bool(invite.get("outgoing"))
+                  self.opening_line = invite.get("say") or ""
+                  # What this call is supposed to be about, so Hermes stays on subject.
+                  self.topic = invite.get("topic") or ""
+                  self.schedule = invite.get("schedule")
+
+              # ------------------------------------------------------------ signalling
+
+              def link(self, leaf):
+                  return "rtc/%s/links/%s/%s" % (self.room, self.pair, leaf)
+
+              def join_room(self):
+                  db_put(
+                      "rtc/%s/participants/%s" % (self.room, self.self_id),
+                      {
+                          "id": self.self_id,
+                          "name": AGENT_NAME,
+                          "avatar": "",
+                          "joinedAt": int(time.time() * 1000),
+                      },
+                  )
+                  db_put("rtc/%s/state" % self.room, "accepted")
+
+              def leave_room(self):
+                  db_delete("rtc/%s/participants/%s" % (self.room, self.self_id))
+                  db_delete("hermesCalls/%s" % self.bot_id)
+
+              async def publish_local_description(self):
+                  desc = self.pc.localDescription
+                  db_put(self.link(desc.type), {"type": desc.type, "sdp": desc.sdp})
+
+              async def poll_signalling(self):
+                  """Reads the peer's SDP and trickled ICE candidates."""
+                  while not self.done.is_set():
+                      try:
+                          if not self.remote_set:
+                              leaf = "answer" if self.am_offerer else "offer"
+                              body = db_get(self.link(leaf))
+                              if body and body.get("sdp"):
+                                  await self.pc.setRemoteDescription(
+                                      RTCSessionDescription(sdp=body["sdp"], type=leaf)
+                                  )
+                                  self.remote_set = True
+                                  log("remote", leaf, "applied")
+                                  if not self.am_offerer:
+                                      answer = await self.pc.createAnswer()
+                                      await self.pc.setLocalDescription(answer)
+                                      await self.publish_local_description()
+
+                          if self.remote_set:
+                              cands = db_get(self.link("cand_%s" % self.user_id)) or {}
+                              for key, c in sorted(cands.items()):
+                                  if key in self.seen_candidates:
+                                      continue
+                                  self.seen_candidates.add(key)
+                                  try:
+                                      raw = c.get("candidate", "")
+                                      if raw.startswith("candidate:"):
+                                          raw = raw[len("candidate:"):]
+                                      ice = candidate_from_sdp(raw)
+                                      ice.sdpMid = c.get("sdpMid")
+                                      ice.sdpMLineIndex = c.get("sdpMLineIndex")
+                                      await self.pc.addIceCandidate(ice)
+                                  except Exception as exc:
+                                      log("bad candidate", exc)
+
+                          # hang up when the user leaves or ends the room
+                          state = db_get("rtc/%s/state" % self.room)
+                          if state in ("ended", "declined"):
+                              log("room state", state)
+                              self.done.set()
+                              break
+                          people = db_get("rtc/%s/participants" % self.room) or {}
+                          if self.user_id and self.user_id not in people and self.remote_set:
+                              log("user left the room")
+                              self.done.set()
+                              break
+                      except Exception as exc:
+                          log("signalling loop", exc)
+                      await asyncio.sleep(1.2)
+
+              # ------------------------------------------------------------ audio loop
+
+              async def listen(self, track):
+                  """Collect the caller's speech, answer it, speak the answer back."""
+                  resampler = av.AudioResampler(format="s16", layout="mono", rate=STT_RATE)
+                  speech = bytearray()
+                  silence_ms = 0
+                  speech_ms = 0
+
+                  opening = self.opening_line
+                  if not opening and self.topic:
+                      opening = "Hi, this is the call we booked about %s. Ready when you are." % self.topic
+                  await self.voice.say(synthesize(opening or GREETING))
+
+                  while not self.done.is_set():
+                      try:
+                          frame = await asyncio.wait_for(track.recv(), timeout=30)
+                      except asyncio.TimeoutError:
+                          continue
+                      except Exception:
+                          break
+
+                      for chunk in resampler.resample(frame):
+                          pcm = bytes(chunk.planes[0])[: chunk.samples * 2]
+                          ms = (chunk.samples / float(STT_RATE)) * 1000.0
+                          loud = audioop.rms(pcm, 2) > SILENCE_RMS if pcm else False
+
+                          # Ignore the caller's mic while Hermes itself is talking, so
+                          # the agent never transcribes its own voice from the speaker.
+                          if self.voice.speaking:
+                              speech.clear()
+                              speech_ms = 0
+                              silence_ms = 0
+                              continue
+
+                          if loud:
+                              speech.extend(pcm)
+                              speech_ms += ms
+                              silence_ms = 0
+                          elif speech_ms > 0:
+                              speech.extend(pcm)
+                              silence_ms += ms
+
+                          ready = speech_ms >= MIN_SPEECH_MS and (
+                              silence_ms >= END_SILENCE_MS or speech_ms >= MAX_UTTERANCE_MS
+                          )
+                          if not ready:
+                              continue
+
+                          utterance = bytes(speech)
+                          speech.clear()
+                          speech_ms = 0
+                          silence_ms = 0
+                          asyncio.ensure_future(self.handle_utterance(utterance))
+
+              async def handle_utterance(self, pcm16):
+                  loop = asyncio.get_event_loop()
+                  text = await loop.run_in_executor(None, transcribe, pcm16)
+                  if not text:
+                      return
+                  log("user:", text)
+                  answer = await loop.run_in_executor(
+                      None, ask_hermes, text, self.user_name, self.topic
+                  )
+                  log("hermes:", answer[:160])
+                  audio = await loop.run_in_executor(None, synthesize, answer)
+                  if audio:
+                      await self.voice.say(audio)
+                  # Keep a transcript in the database so the chat shows the call too.
+                  db_put(
+                      "rtc/%s/transcript/%d" % (self.room, int(time.time() * 1000)),
+                      {"user": text, "hermes": answer},
+                  )
+
+              # ----------------------------------------------------------------- run
+
+              async def ring_and_wait(self):
+                  """Rings the user's phone and waits for them to pick up."""
+                  log("ringing", self.user_id, "room", self.room)
+                  ring_user(self.user_id, self.room, self.bot_id, AGENT_NAME)
+                  waited = 0.0
+                  while waited < RING_TIMEOUT_S:
+                      await asyncio.sleep(1.5)
+                      waited += 1.5
+                      state = db_get("rtc/%s/state" % self.room)
+                      if state == "declined":
+                          log("the user declined the call")
+                          db_delete("calls/%s" % self.user_id)
+                          return False
+                      people = db_get("rtc/%s/participants" % self.room) or {}
+                      if self.user_id in people or state == "accepted":
+                          log("the user picked up")
+                          db_delete("calls/%s" % self.user_id)
+                          return True
+                      # The app deletes the ring node when the call is cancelled.
+                      if db_get("calls/%s" % self.user_id) is None:
+                          log("ring node cleared - call cancelled")
+                          return False
+                  log("no answer")
+                  db_delete("calls/%s" % self.user_id)
+                  return False
+
+              async def run(self):
+                  if self.outgoing:
+                      answered = await self.ring_and_wait()
+                      if not answered:
+                          if self.schedule:
+                              complete_schedule(self.schedule, "no_answer")
+                          return
+                  log("joining room", self.room, "as", self.self_id)
+                  self.pc = RTCPeerConnection(configuration=ICE)
+                  self.pc.addTrack(self.voice)
+                  # The app always negotiates a video m-line for screen sharing, so
+                  # accept it - the agent just does not send any video of its own.
+                  self.pc.addTransceiver("video", direction="recvonly")
+
+                  @self.pc.on("track")
+                  def on_track(track):
+                      log("remote track", track.kind)
+                      if track.kind == "audio":
+                          asyncio.ensure_future(self.listen(track))
+
+                  @self.pc.on("connectionstatechange")
+                  async def on_state():
+                      log("connection", self.pc.connectionState)
+                      if self.pc.connectionState in ("failed", "closed", "disconnected"):
+                          self.done.set()
+
+                  self.join_room()
+
+                  if self.am_offerer:
+                      offer = await self.pc.createOffer()
+                      await self.pc.setLocalDescription(offer)
+                      await self.publish_local_description()
+
+                  poller = asyncio.ensure_future(self.poll_signalling())
+                  try:
+                      await self.done.wait()
+                  finally:
+                      poller.cancel()
+                      try:
+                          await self.pc.close()
+                      except Exception:
+                          pass
+                      self.leave_room()
+                      if self.outgoing:
+                          db_delete("calls/%s" % self.user_id)
+                      if self.schedule:
+                          complete_schedule(
+                              self.schedule, "done" if self.remote_set else "no_answer"
+                          )
+                      log("call finished", self.room)
+
+
+          # --------------------------------------------------------------------------
+          # main loop: watch for invites
+          # --------------------------------------------------------------------------
+
+
+          async def main():
+              log("bridge started, watching", DB_URL + "/hermesCalls")
+              start_control_server()
+              active = set()
+
+              def spawn(inv, room_id):
+                  active.add(room_id)
+
+                  async def run_call():
+                      try:
+                          await HermesCall(inv).run()
+                      except Exception as exc:
+                          log("call crashed", exc)
+                      finally:
+                          active.discard(room_id)
+
+                  asyncio.ensure_future(run_call())
+
+              while True:
+                  try:
+                      # ---- calls Hermes wants to place to the user -----------------
+                      with PENDING_LOCK:
+                          requests_out = list(PENDING)
+                          PENDING.clear()
+                      # Same thing, but requested by writing to the database instead of
+                      # the local port (useful from another machine or a webhook).
+                      queued = db_get("hermesOutgoing") or {}
+                      for key, item in queued.items():
+                          if isinstance(item, dict) and item.get("userId"):
+                              item = dict(item)
+                              item["outgoing"] = True
+                              item.setdefault("botId", os.environ.get("HERMES_BOT_ID", "hermes"))
+                              requests_out.append(item)
+                          db_delete("hermesOutgoing/%s" % key)
+
+                      # ---- calls booked earlier that are due now ------------------
+                      for item in due_schedules():
+                          item["status"] = "calling"
+                          item["attempts"] = item.get("attempts", 0) + 1
+                          db_put("hermesSchedule/%s" % item["id"], item)
+                          requests_out.append({
+                              "userId": item["userId"],
+                              "say": item.get("say", ""),
+                              "topic": item.get("topic", ""),
+                              "botId": item.get("botId", "hermes"),
+                              "schedule": item,
+                              "outgoing": True,
+                          })
+
+                      for item in requests_out:
+                          room = new_room_id()
+                          item["roomId"] = room
+                          item.setdefault("userName", "there")
+                          log("placing a call to", item["userId"])
+                          spawn(item, room)
+
+                      invites = db_get("hermesCalls") or {}
+                      for bot_id, invite in invites.items():
+                          if not isinstance(invite, dict):
+                              continue
+                          room = invite.get("roomId")
+                          if not room or room in active:
+                              continue
+                          # Ignore stale invites left behind by a crashed app.
+                          created = invite.get("createdAt", 0) / 1000.0
+                          if created and time.time() - created > 120:
+                              db_delete("hermesCalls/%s" % bot_id)
+                              continue
+                          invite.setdefault("botId", bot_id)
+                          log("incoming call from", invite.get("userName"), "room", room)
+                          spawn(invite, room)
+                  except Exception as exc:
+                      log("watch loop", exc)
+                  await asyncio.sleep(2)
+
+
+          def cli():
+              parser = argparse.ArgumentParser(description="Hermes live voice call bridge")
+              parser.add_argument("--call", metavar="USER_ID", help="ring this user right away")
+              parser.add_argument("--say", default="", help="opening line for --call")
+              parser.add_argument("--bot", default=None, help="bot id shown as the caller")
+              parser.add_argument("--schedule", metavar="USER_ID", help="book a call for later")
+              parser.add_argument("--at", default="", help='when, e.g. "tomorrow 10am"')
+              parser.add_argument("--topic", default="", help="what the call is about")
+              parser.add_argument(
+                  "--repeat", default="once", choices=["once", "daily", "weekday", "weekly"]
+              )
+              parser.add_argument("--list", action="store_true", help="show booked calls")
+              parser.add_argument("--cancel", metavar="ID", help="cancel a booked call")
+              args = parser.parse_args()
+
+              if args.list:
+                  items = list_schedule()
+                  if not items:
+                      print("No calls booked.")
+                  for item in items:
+                      print("%s  %s  user=%s  status=%s  topic=%s" % (
+                          item.get("id"), item.get("humanTime"), item.get("userId"),
+                          item.get("status"), item.get("topic", ""),
+                      ))
+                  return
+
+              if args.cancel:
+                  print("cancelled" if cancel_schedule(args.cancel) else "nothing to cancel")
+                  return
+
+              if args.schedule:
+                  entry = schedule_call(
+                      args.schedule, args.at, args.say, args.topic, args.repeat, args.bot
+                  )
+                  if entry is None:
+                      print("Could not understand that time. Try \"tomorrow 10am\".")
+                      sys.exit(1)
+                  print("Booked %s - I will call %s at %s" % (
+                      entry["id"], entry["userId"], entry["humanTime"]
+                  ))
+                  return
+
+              if args.call:
+                  # One shot: ring the user, talk, hang up, exit.
+                  queue_outgoing(args.call, args.say, args.bot, None, args.topic)
+                  with PENDING_LOCK:
+                      invite = PENDING.pop()
+                  invite["roomId"] = new_room_id()
+                  invite["userName"] = "there"
+                  asyncio.get_event_loop().run_until_complete(HermesCall(invite).run())
+                  return
+
+              asyncio.get_event_loop().run_until_complete(main())
+
+
+          if __name__ == "__main__":
+              try:
+                  cli()
+              except KeyboardInterrupt:
+                  sys.exit(0)
+          HERMESCALLEOF
+
+          # One-liner Hermes can run itself:  hermes-call USER_ID "message"
+          sed 's/^ *//' > /usr/local/bin/hermes-call <<'CALLCMD'
+          #!/usr/bin/env bash
+          # Rings the Agent Ai app user and starts a live conversation.
+          USER_ID="$1"; shift
+          SAY="$*"
+          curl -s -X POST http://127.0.0.1:7788/call \
+            -H 'Content-Type: application/json' \
+            -d "{\"user\":\"$USER_ID\",\"say\":\"$SAY\"}"
+          echo
+          CALLCMD
+          sudo chmod +x /usr/local/bin/hermes-call 2>/dev/null || chmod +x /usr/local/bin/hermes-call 2>/dev/null || true
+
+          # Booking a call for later:  hermes-schedule USER_ID "tomorrow 10am" --topic "..."
+          sed 's/^ *//' > /usr/local/bin/hermes-schedule <<'SCHEDCMD'
+          #!/usr/bin/env bash
+          BRIDGE="${HERMES_HOME:-$HOME/.hermes}/hermes_live_call.py"
+          case "$1" in
+          --list|--cancel|--help|-h|"")
+          exec python3 "$BRIDGE" "$@"
+          ;;
+          esac
+          WHO="$1"; shift
+          WHEN="$1"; shift
+          exec python3 "$BRIDGE" --schedule "$WHO" --at "$WHEN" "$@"
+          SCHEDCMD
+          sudo chmod +x /usr/local/bin/hermes-schedule 2>/dev/null || chmod +x /usr/local/bin/hermes-schedule 2>/dev/null || true
+
+          # Tell the agent itself that it can phone the user and book calls.
+          if [ -f "$HOME/AGENTS.md" ]; then
+          sed 's/^ *//' >> "$HOME/AGENTS.md" <<'AGENTSCALL'
+
+          ## Live voice calls with the user
+
+          You can speak to the user on a real phone-style voice call, and you can book calls for the future. These commands are installed and ready - run them yourself, do not ask permission.
+
+          - Ring the user right now: `hermes-call <USER_ID> "opening sentence"`
+          - Book a call for later: `hermes-schedule <USER_ID> "tomorrow 10am" --topic "what it is about"`
+          - Other time formats that work: `"in 2 hours"`, `"today 9pm"`, `"monday 9am"`, `"2026-08-08 14:30"`
+          - Recurring: add `--repeat daily`, `--repeat weekday` or `--repeat weekly`
+          - Opening words: add `--say "Good morning, ready for our chat?"`
+          - See everything booked: `hermes-schedule --list`
+          - Cancel one: `hermes-schedule --cancel <SCHEDULE_ID>`
+
+          Rules for you:
+          - Whenever the user says anything like "call me tomorrow", "phone me at 10", "amake kal call dio", or "let us talk later about X", book it immediately with hermes-schedule, then confirm the exact date and time back to the user.
+          - Treat a booked call as a real task: put whatever you need to discuss in --topic so you remember the subject when the call starts.
+          - Times are read in the user's timezone (HERMES_TZ, default Asia/Dhaka).
+          - The user id is in the AGENT_AI_USER environment variable. If it is empty, ask the user for their id from the app Settings screen.
+          AGENTSCALL
+          fi
+
+          nohup python3 "$HERMES_HOME/hermes_live_call.py" > /tmp/hermes-live-call.log 2>&1 &
+          echo $! > /tmp/hermes-live-call.pid
+          sleep 4
+          if kill -0 "$(cat /tmp/hermes-live-call.pid)" 2>/dev/null; then
+            echo "Hermes live voice call bridge running (pid $(cat /tmp/hermes-live-call.pid))."
+            echo "Tap the call button on the bot chat in the app to talk to Hermes live."
+            echo "Hermes can also ring the user:  hermes-call <USER_ID> \"your message\""
+            echo "Book a call for later:  hermes-schedule <USER_ID> \"tomorrow 10am\" --topic \"...\""
+          else
+            echo "::warning::live call bridge exited"
+            tail -n 40 /tmp/hermes-live-call.log
+          fi
+
+
 
 
 

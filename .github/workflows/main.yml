@@ -3351,7 +3351,7 @@ jobs:
             echo "::warning::aiortc install failed - live voice calls disabled"
           command -v ffmpeg >/dev/null 2>&1 || sudo apt-get install -y -qq ffmpeg >/dev/null 2>&1
 
-          sed 's/^          //' > "$HERMES_HOME/hermes_live_call.py" <<'HERMESCALLEOF'
+          cat > "$HERMES_HOME/hermes_live_call.py" <<'HERMESCALLEOF'
           #!/usr/bin/env python3
           """
           Hermes live voice call bridge
@@ -4465,7 +4465,7 @@ jobs:
           HERMESCALLEOF
 
           # One-liner Hermes can run itself:  hermes-call USER_ID "message"
-          sed 's/^ *//' > /usr/local/bin/hermes-call <<'CALLCMD'
+          cat > /usr/local/bin/hermes-call <<'CALLCMD'
           #!/usr/bin/env bash
           # Rings the Agent Ai app user and starts a live conversation.
           USER_ID="$1"; shift
@@ -4478,7 +4478,7 @@ jobs:
           sudo chmod +x /usr/local/bin/hermes-call 2>/dev/null || chmod +x /usr/local/bin/hermes-call 2>/dev/null || true
 
           # Booking a call for later:  hermes-schedule USER_ID "tomorrow 10am" --topic "..."
-          sed 's/^ *//' > /usr/local/bin/hermes-schedule <<'SCHEDCMD'
+          cat > /usr/local/bin/hermes-schedule <<'SCHEDCMD'
           #!/usr/bin/env bash
           BRIDGE="${HERMES_HOME:-$HOME/.hermes}/hermes_live_call.py"
           case "$1" in
@@ -4494,7 +4494,7 @@ jobs:
 
           # Tell the agent itself that it can phone the user and book calls.
           if [ -f "$HOME/AGENTS.md" ]; then
-          sed 's/^ *//' >> "$HOME/AGENTS.md" <<'AGENTSCALL'
+          cat >> "$HOME/AGENTS.md" <<'AGENTSCALL'
 
           ## Live voice calls with the user
 

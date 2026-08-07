@@ -3341,6 +3341,8 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           HERMES_AGENT_NAME: Hermes
           HERMES_TTS_VOICE: en-US-AriaNeural
+          HERMES_TTS_VOICE_EN: en-US-AriaNeural
+          HERMES_TTS_VOICE_BN: bn-BD-NabanitaNeural
           HERMES_CHAT_CMD: hermes chat -q
           HERMES_POOL_URL: http://localhost:4000/v1
           HERMES_POOL_MODEL: pool-auto
@@ -3350,6 +3352,27 @@ jobs:
           python3 -m pip install --quiet --upgrade aiortc av requests >/tmp/aiortc-install.log 2>&1 || \
             echo "::warning::aiortc install failed - live voice calls disabled"
           command -v ffmpeg >/dev/null 2>&1 || sudo apt-get install -y -qq ffmpeg >/dev/null 2>&1
+
+          # Local neural voice for English. Piper runs on the CPU with no
+          # network round trip, so replies start speaking almost instantly
+          # instead of waiting on a cloud TTS request. Bangla still uses
+          # edge-tts because there is no comparable local Bangla voice.
+          python3 -m pip install --quiet --upgrade piper-tts >>/tmp/aiortc-install.log 2>&1 || \
+            echo "::warning::piper-tts unavailable - English will use edge-tts"
+          PIPER_DIR="$HERMES_HOME/piper-voices"
+          mkdir -p "$PIPER_DIR"
+          if [ ! -s "$PIPER_DIR/en_US-amy-medium.onnx" ]; then
+            PV="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium"
+            curl -fsSL "$PV/en_US-amy-medium.onnx" \
+              -o "$PIPER_DIR/en_US-amy-medium.onnx" 2>/dev/null || true
+            curl -fsSL "$PV/en_US-amy-medium.onnx.json" \
+              -o "$PIPER_DIR/en_US-amy-medium.onnx.json" 2>/dev/null || true
+          fi
+          if [ -s "$PIPER_DIR/en_US-amy-medium.onnx" ]; then
+            echo "local English voice ready: piper amy (female)"
+          else
+            echo "::warning::piper voice model missing - English will use edge-tts"
+          fi
 
           cat > "$HERMES_HOME/hermes_live_call.py" <<'HERMESCALLEOF'
           #!/usr/bin/env python3
@@ -3392,7 +3415,9 @@ jobs:
               HERMES_AGENT_NAME display name shown in the call        (default "Hermes")
               GROQ_API_KEY      speech to text
               HERMES_STT_MODEL  default whisper-large-v3-turbo
-              HERMES_TTS_VOICE  default en-US-AriaNeural
+              HERMES_TTS_VOICE_EN  English voice   (default en-US-AriaNeural)
+              HERMES_TTS_VOICE_BN  Bangla voice    (default bn-BD-NabanitaNeural)
+              HERMES_PIPER_MODEL   local Piper .onnx used for English when present
               HERMES_CHAT_CMD   default "hermes chat -q"
               HERMES_POOL_URL   fallback chat endpoint (default http://localhost:4000/v1)
               HERMES_POOL_MODEL default pool-auto
@@ -3401,6 +3426,7 @@ jobs:
           import argparse
           import asyncio
           import audioop
+          import collections
           import fractions
           import io
           import json
@@ -3408,6 +3434,7 @@ jobs:
           from http.server import BaseHTTPRequestHandler, HTTPServer
           import os
           import shlex
+          import shutil
           import subprocess
           import sys
           import time
@@ -3441,6 +3468,26 @@ jobs:
           GROQ_KEY = os.environ.get("GROQ_API_KEY", "").strip()
           STT_MODEL = os.environ.get("HERMES_STT_MODEL", "whisper-large-v3-turbo")
           TTS_VOICE = os.environ.get("HERMES_TTS_VOICE", "en-US-AriaNeural")
+
+          # ---- language aware voices ----------------------------------------------
+          # English is spoken by a local Piper neural voice. It runs on the CPU with
+          # no network round trip, so the first syllable lands in a fraction of the
+          # time a cloud voice needs - that is what keeps the call feeling live.
+          # Bangla has no good local voice, so it uses the Microsoft Bangla female
+          # voice through edge-tts. Switching happens per sentence, so a mixed
+          # Banglish reply is spoken correctly on both sides.
+          TTS_VOICE_EN = os.environ.get("HERMES_TTS_VOICE_EN", TTS_VOICE)
+          TTS_VOICE_BN = os.environ.get("HERMES_TTS_VOICE_BN", "bn-BD-NabanitaNeural")
+          PIPER_BIN = os.environ.get("HERMES_PIPER_BIN", "piper")
+          PIPER_MODEL = os.environ.get(
+              "HERMES_PIPER_MODEL",
+              os.path.join(
+                  os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
+                  "piper-voices", "en_US-amy-medium.onnx",
+              ),
+          )
+          # Bengali occupies this Unicode block; one character is enough to switch.
+          BENGALI_RE = re.compile("[\u0980-\u09ff]")
           CHAT_CMD = os.environ.get("HERMES_CHAT_CMD", "hermes chat -q")
           POOL_URL = os.environ.get("HERMES_POOL_URL", "http://localhost:4000/v1").rstrip("/")
           POOL_MODEL = os.environ.get("HERMES_POOL_MODEL", "pool-auto")
@@ -3457,6 +3504,32 @@ jobs:
           MIN_SPEECH_MS = 400          # ignore coughs and clicks
           END_SILENCE_MS = 900         # this much silence ends an utterance
           MAX_UTTERANCE_MS = 25000     # hard stop so we always answer something
+
+          # ---- voice activity detection -------------------------------------------
+          # Speech is modulated and sits in a middle zero-crossing band. Wind, fans,
+          # traffic and room tone are steady and land either well below that band
+          # (rumble) or well above it (hiss). We track the room noise floor live and
+          # judge every 20 ms frame against it instead of against a fixed number.
+          SPEECH_RMS_FACTOR = 1.9      # normal listening: how far above the floor
+          BARGE_RMS_FACTOR = 3.4       # cutting Hermes off needs much more certainty
+          BARGE_MIN_RMS = 850          # absolute floor for an interruption
+          BARGE_MIN_MS = 320           # speech must hold this long to interrupt
+          ZCR_MIN = 0.020              # below this it is rumble or wind, not a voice
+          ZCR_MAX = 0.320              # above this it is hiss, clicks or static
+          NOISE_ADAPT = 0.02           # how fast the noise floor follows the room
+          MODULATION_MIN = 1.6         # speech swings in level; a fan does not
+          PREROLL_MS = 420             # audio kept so the first word is never lost
+          BARGE_IN = os.environ.get("HERMES_BARGE_IN", "1").lower() not in (
+              "0", "false", "no", "off")
+
+          # ---- reply shaping -------------------------------------------------------
+          HISTORY_TURNS = 6            # how much of the call the model gets to see
+          MAX_SENTENCES = 3            # a phone answer, not an essay
+          MAX_REPLY_CHARS = 420
+          # "pool" is stateless, so the reply can never drag in an unrelated chat
+          # history. Set HERMES_CALL_BACKEND=cli to route calls through the Hermes
+          # CLI instead, or =auto to try the pool first and fall back to the CLI.
+          CALL_BACKEND = os.environ.get("HERMES_CALL_BACKEND", "auto").strip().lower()
           RING_TIMEOUT_S = 45          # how long we let the phone ring
           CONTROL_PORT = int(os.environ.get("HERMES_CALL_PORT", "7788"))
           LOCAL_TZ = os.environ.get("HERMES_TZ", "Asia/Dhaka")
@@ -3934,78 +4007,362 @@ jobs:
                   return ""
 
 
-          def ask_hermes(text, user_name, topic=""):
-              """Send the user's words to Hermes and return the spoken answer."""
-              about = (
-                  " This call was booked to talk about: %s." % topic if topic else ""
+          EMOJI_RE = re.compile(
+              "[\U00010000-\U0010ffff\u2190-\u21ff\u2600-\u27bf\ufe0f\u2b00-\u2bff]",
+              flags=re.UNICODE,
+          )
+
+          # Whisper invents these out of silence and background hum. Answering them is
+          # what makes the agent babble, so an utterance that is only this is dropped.
+          NOISE_TRANSCRIPTS = {
+              "", ".", "..", "...", "you", "thank you", "thankyou", "thanks for watching",
+              "subtitles by the amaraorg community", "please subscribe", "uh", "um",
+              "umm", "hmm", "mm", "mhm", "ah", "eh", "oh", "bye bye",
+          }
+
+          SYSTEM_PROMPT = (
+              "You are Hermes and you are on a live phone call. Speak the way a person "
+              "speaks on the phone: one to three short sentences of plain spoken words. "
+              "Never use markdown, bullet points, numbered lists, headings, code blocks, "
+              "emoji or stage directions. Never repeat anything you already said in this "
+              "call. Never read the conversation back to the caller and never restate "
+              "their question. Reply only to the very last thing they said. If you did "
+              "not understand, say so in one short sentence and ask them to repeat."
+          )
+
+
+          def meaningful(text):
+              """False for the filler Whisper hallucinates when nobody is speaking."""
+              stripped = re.sub(r"[^0-9a-z\u0980-\u09ff ]", "", (text or "").lower()).strip()
+              stripped = re.sub(r"\s+", " ", stripped)
+              if len(stripped) < 2:
+                  return False
+              return stripped not in NOISE_TRANSCRIPTS
+
+
+          def clean_reply(text, history=()):
+              """
+              Turns whatever the model produced into something worth speaking aloud:
+              no markdown, no role labels, no transcript echo, no repetition of a line
+              Hermes already said, and never longer than a few sentences.
+              """
+              if not text:
+                  return ""
+              out = text.strip()
+              out = re.sub(r"```.*?```", " ", out, flags=re.S)          # code fences
+              out = re.sub(r"`([^`]*)`", r"\1", out)
+              out = re.sub(r"<think>.*?</think>", " ", out, flags=re.S)  # reasoning dumps
+              out = re.sub(r"<[^>]+>", " ", out)
+              # a role label the CLI sometimes prints in front of the answer
+              out = re.sub(r"^\s*(assistant|hermes|ai|bot|answer|response|reply)\s*[:\-]\s*",
+                           "", out, flags=re.I)
+              # whole lines that just replay the conversation
+              out = re.sub(r"^\s*(user|caller|you|me|human)\s*[:\-].*$", "",
+                           out, flags=re.I | re.M)
+              out = re.sub(r"^\s*(assistant|hermes)\s*[:\-]\s*", "", out, flags=re.I | re.M)
+              out = re.sub(r"^\s*#{1,6}\s*", "", out, flags=re.M)         # headings
+              out = re.sub(r"^\s*[-*\u2022]\s+", "", out, flags=re.M)      # bullets
+              out = re.sub(r"^\s*\d+[.)]\s+", "", out, flags=re.M)         # numbering
+              out = re.sub(r"\*\*([^*]*)\*\*", r"\1", out)
+              out = re.sub(r"\*([^*]*)\*", r"\1", out)
+              out = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", out)          # links
+              out = EMOJI_RE.sub("", out)
+              out = re.sub(r"\s+", " ", out).strip()
+              if not out:
+                  return ""
+
+              spoken = set()
+              for who, line in history:
+                  if who == "hermes":
+                      for piece in re.split(r"(?<=[.!?\u0964])\s+", line):
+                          piece = piece.strip().lower()
+                          if piece:
+                              spoken.add(piece)
+
+              kept = []
+              seen = set()
+              for sentence in re.split(r"(?<=[.!?\u0964])\s+", out):
+                  sentence = sentence.strip()
+                  if not sentence:
+                      continue
+                  key = sentence.lower()
+                  if key in seen or key in spoken:
+                      continue          # already said, do not say it twice
+                  seen.add(key)
+                  kept.append(sentence)
+                  if len(kept) >= MAX_SENTENCES:
+                      break
+              out = " ".join(kept).strip()
+
+              if len(out) > MAX_REPLY_CHARS:
+                  cut = out[:MAX_REPLY_CHARS]
+                  stop = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
+                  out = cut[: stop + 1] if stop > 60 else cut.rstrip(" ,;:") + "."
+              return out.strip()
+
+
+          def _ask_pool(messages):
+              r = requests.post(
+                  "%s/chat/completions" % POOL_URL,
+                  json={
+                      "model": POOL_MODEL,
+                      "messages": messages,
+                      "max_tokens": 160,
+                      "temperature": 0.6,
+                  },
+                  timeout=90,
               )
-              prompt = (
-                  "You are on a live phone call with %s.%s Answer in a natural, spoken "
-                  "style, at most three short sentences, no markdown, no lists, no "
-                  "emoji. The caller said: %s" % (user_name or "the user", about, text)
+              if r.status_code != 200:
+                  log("pool http", r.status_code, r.text[:200])
+                  return ""
+              return (r.json()["choices"][0]["message"]["content"] or "").strip()
+
+
+          def _ask_cli(system, history, text):
+              recap = " ".join(
+                  "%s said: %s" % ("The caller" if who == "user" else "You", line)
+                  for who, line in list(history)[-4:]
               )
-              # 1) the real Hermes CLI
-              try:
-                  cmd = shlex.split(CHAT_CMD) + [prompt]
-                  out = subprocess.run(
-                      cmd, capture_output=True, text=True, timeout=120
-                  )
-                  answer = (out.stdout or "").strip()
-                  if answer:
-                      return answer
+              prompt = system
+              if recap:
+                  prompt += " Earlier in this call, " + recap
+              prompt += (
+                  " The caller just said: %s. Reply out loud with your answer only." % text
+              )
+              out = subprocess.run(
+                  shlex.split(CHAT_CMD) + [prompt], capture_output=True, text=True, timeout=90
+              )
+              answer = (out.stdout or "").strip()
+              if not answer:
                   log("hermes cli empty", (out.stderr or "")[:200])
-              except Exception as exc:
-                  log("hermes cli failed", exc)
-              # 2) the local model pool router the workflow already runs
+              return answer
+
+
+          def ask_hermes(text, user_name, topic="", history=()):
+              """Send the caller's last line to Hermes and return the spoken answer."""
+              about = " This call is about: %s." % topic if topic else ""
+              system = SYSTEM_PROMPT + " You are talking to %s.%s" % (
+                  user_name or "the caller", about
+              )
+
+              messages = [{"role": "system", "content": system}]
+              for who, line in list(history)[-HISTORY_TURNS * 2:]:
+                  messages.append(
+                      {"role": "assistant" if who == "hermes" else "user", "content": line}
+                  )
+              messages.append({"role": "user", "content": text})
+
+              order = ["cli"] if CALL_BACKEND == "cli" else ["pool"]
+              if CALL_BACKEND in ("auto", "cli"):
+                  order.append("cli" if order[0] == "pool" else "pool")
+
+              for backend in order:
+                  try:
+                      answer = (
+                          _ask_pool(messages) if backend == "pool"
+                          else _ask_cli(system, history, text)
+                      )
+                      if answer:
+                          return answer
+                  except Exception as exc:
+                      log("%s backend failed" % backend, exc)
+              return "Sorry, I did not catch that. Could you say it again?"
+
+
+          def detect_language(text):
+              """"bn" when the text is meaningfully Bangla, otherwise "en"."""
+              if not text:
+                  return "en"
+              bengali = len(BENGALI_RE.findall(text))
+              if not bengali:
+                  return "en"
+              letters = len([c for c in text if c.isalpha()])
+              # A stray Bangla character inside an English sentence should not flip the
+              # whole line over to the Bangla voice.
+              return "bn" if letters and bengali / float(letters) >= 0.30 else "en"
+
+
+          def split_by_language(text):
+              """
+              Break a reply into consecutive same-language runs.
+
+              Hermes often answers in Banglish - an English sentence followed by a Bangla
+              one. Speaking the whole thing with one voice mangles half of it, so each
+              sentence is routed to the voice that belongs to it and the audio is joined
+              back together seamlessly.
+              """
+              parts = [p for p in re.split(r"(?<=[.!?\u0964])\s+", text or "") if p.strip()]
+              if not parts:
+                  return []
+              runs = []
+              for part in parts:
+                  lang = detect_language(part)
+                  if runs and runs[-1][0] == lang:
+                      runs[-1][1] = runs[-1][1] + " " + part.strip()
+                  else:
+                      runs.append([lang, part.strip()])
+              return [(lang, chunk) for lang, chunk in runs]
+
+
+          def _to_call_pcm(raw, in_rate=None, from_file=None):
+              """Whatever the engine produced -> 48 kHz mono s16le the call can carry."""
+              cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+              if from_file:
+                  cmd += ["-i", from_file]
+              else:
+                  cmd += ["-f", "s16le", "-ar", str(in_rate), "-ac", "1", "-i", "-"]
+              cmd += ["-f", "s16le", "-acodec", "pcm_s16le",
+                      "-ar", str(SAMPLE_RATE), "-ac", "1", "-"]
+              out = subprocess.run(
+                  cmd, input=None if from_file else raw, capture_output=True, timeout=120
+              )
+              return out.stdout or b""
+
+
+          def _piper_rate():
+              """Piper models carry their sample rate in a sidecar json."""
               try:
-                  r = requests.post(
-                      "%s/chat/completions" % POOL_URL,
-                      json={
-                          "model": POOL_MODEL,
-                          "messages": [{"role": "user", "content": prompt}],
-                          "max_tokens": 300,
-                      },
+                  with io.open(PIPER_MODEL + ".json", encoding="utf-8") as fh:
+                      return int(json.load(fh)["audio"]["sample_rate"])
+              except Exception:
+                  return 22050
+
+
+          def piper_available():
+              return bool(shutil.which(PIPER_BIN)) and os.path.exists(PIPER_MODEL)
+
+
+          def _speak_local(text):
+              """Local Piper neural voice. Fast enough to feel instant."""
+              if not piper_available():
+                  return b""
+              try:
+                  out = subprocess.run(
+                      [PIPER_BIN, "--model", PIPER_MODEL, "--output_raw"],
+                      input=text.encode("utf-8"),
+                      capture_output=True,
                       timeout=120,
                   )
-                  if r.status_code == 200:
-                      return r.json()["choices"][0]["message"]["content"].strip()
-                  log("pool http", r.status_code, r.text[:200])
+                  if not out.stdout:
+                      log("piper produced nothing", (out.stderr or b"")[:160])
+                      return b""
+                  return _to_call_pcm(out.stdout, in_rate=_piper_rate())
               except Exception as exc:
-                  log("pool failed", exc)
-              return "Sorry, I could not reach my brain just now."
-
-
-          def synthesize(text):
-              """edge-tts -> 48 kHz mono signed 16 bit PCM ready for WebRTC."""
-              if not text:
+                  log("piper failed", exc)
                   return b""
+
+
+          def _speak_edge(text, voice):
+              """Microsoft neural voices through edge-tts."""
               mp3 = "/tmp/hermes_call_%s.mp3" % uuid.uuid4().hex[:8]
               try:
                   subprocess.run(
-                      ["edge-tts", "--voice", TTS_VOICE, "--text", text, "--write-media", mp3],
+                      ["edge-tts", "--voice", voice, "--text", text, "--write-media", mp3],
                       capture_output=True,
                       timeout=120,
                   )
                   if not os.path.exists(mp3) or os.path.getsize(mp3) == 0:
+                      log("edge-tts produced nothing for voice", voice)
                       return b""
-                  out = subprocess.run(
-                      [
-                          "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", mp3,
-                          "-f", "s16le", "-acodec", "pcm_s16le",
-                          "-ar", str(SAMPLE_RATE), "-ac", "1", "-",
-                      ],
-                      capture_output=True,
-                      timeout=120,
-                  )
-                  return out.stdout or b""
+                  return _to_call_pcm(None, from_file=mp3)
               except Exception as exc:
-                  log("tts failed", exc)
+                  log("edge-tts failed", exc)
                   return b""
               finally:
                   try:
                       os.remove(mp3)
                   except Exception:
                       pass
+
+
+          def synthesize(text):
+              """
+              Speak a reply, switching voice per language.
+
+                  English -> local Piper female voice, edge-tts female as a fallback
+                  Bangla  -> Bangla female voice through edge-tts
+
+              Returns 48 kHz mono signed 16 bit PCM ready to push into the call.
+              """
+              if not text:
+                  return b""
+              audio = bytearray()
+              for lang, chunk in split_by_language(text):
+                  if lang == "bn":
+                      piece = _speak_edge(chunk, TTS_VOICE_BN)
+                  else:
+                      piece = _speak_local(chunk) or _speak_edge(chunk, TTS_VOICE_EN)
+                  if piece:
+                      audio.extend(piece)
+                  else:
+                      log("no audio for a", lang, "segment")
+              return bytes(audio)
+
+
+          # --------------------------------------------------------------------------
+          # voice activity detection
+          # --------------------------------------------------------------------------
+
+
+          def zero_crossing_rate(pcm16):
+              """Fraction of samples where the waveform crosses zero.
+
+              A human voice lands around 0.03 - 0.25. Wind, rumble and handling noise
+              sit far below that; hiss, static and keyboard clicks sit far above it.
+              This one number rejects most of what is not a person talking.
+              """
+              samples = len(pcm16) // 2
+              if samples < 2:
+                  return 0.0
+              try:
+                  return audioop.cross(pcm16, 2) / float(samples)
+              except Exception:
+                  return 0.0
+
+
+          class SpeechGate:
+              """
+              Adaptive gate that decides whether a 20 ms frame is a person speaking.
+
+              Three independent tests must agree, which is what keeps a fan, a busy
+              street or wind across the microphone from ever triggering it:
+
+                1. loudness  - well above the *measured* noise floor of this room,
+                               not above some fixed number that breaks everywhere else
+                2. timbre    - zero-crossing rate inside the human speech band
+                3. modulation- the level actually moves; steady noise never does
+
+              The floor keeps learning while nobody talks, so a noisy room simply
+              raises the bar instead of producing false interruptions.
+              """
+
+              def __init__(self):
+                  self.floor = float(SILENCE_RMS)
+                  self.recent = collections.deque(maxlen=25)   # ~500 ms of levels
+
+              def observe(self, pcm16):
+                  rms = audioop.rms(pcm16, 2)
+                  self.recent.append(rms)
+                  return rms, zero_crossing_rate(pcm16)
+
+              def adapt(self, rms):
+                  """Follow the room. Drops fast, rises slowly, never runs away."""
+                  rate = NOISE_ADAPT if rms > self.floor else NOISE_ADAPT * 4
+                  self.floor = (1.0 - rate) * self.floor + rate * rms
+                  self.floor = max(60.0, min(self.floor, 5000.0))
+
+              @property
+              def modulated(self):
+                  if len(self.recent) < 8:
+                      return False
+                  quiet = min(self.recent)
+                  loud = max(self.recent)
+                  return loud > (quiet + 1) * MODULATION_MIN
+
+              def is_speech(self, rms, zcr, factor, minimum):
+                  if rms <= max(minimum, self.floor * factor):
+                      return False
+                  return ZCR_MIN <= zcr <= ZCR_MAX
 
 
           # --------------------------------------------------------------------------
@@ -4091,6 +4448,11 @@ jobs:
                   # What this call is supposed to be about, so Hermes stays on subject.
                   self.topic = invite.get("topic") or ""
                   self.schedule = invite.get("schedule")
+                  # What has actually been said on this call, so the model gets real
+                  # context instead of replaying an unrelated chat session.
+                  self.history = []
+                  # The reply currently being produced; cancelled on a barge-in.
+                  self.reply_task = None
 
               # ------------------------------------------------------------ signalling
 
@@ -4169,17 +4531,59 @@ jobs:
 
               # ------------------------------------------------------------ audio loop
 
+              async def speak(self, text):
+                  """Synthesise off the event loop, then hand the audio to the track."""
+                  if not text:
+                      return
+                  loop = asyncio.get_event_loop()
+                  audio = await loop.run_in_executor(None, synthesize, text)
+                  if audio:
+                      await self.voice.say(audio)
+
+              async def interrupt(self):
+                  """Caller started talking: go quiet immediately and drop the reply."""
+                  await self.voice.stop_speaking()
+                  task = self.reply_task
+                  self.reply_task = None
+                  if task is not None and not task.done():
+                      task.cancel()
+
+              def spawn_reply(self, pcm16):
+                  task = self.reply_task
+                  if task is not None and not task.done():
+                      task.cancel()
+                  self.reply_task = asyncio.ensure_future(self.handle_utterance(pcm16))
+
               async def listen(self, track):
-                  """Collect the caller's speech, answer it, speak the answer back."""
+                  """
+                  Listen to the caller, answer, and speak the answer back.
+
+                  While Hermes is talking the gate stays armed. If the caller genuinely
+                  starts speaking - loud enough against the live noise floor, in the human
+                  zero-crossing band, modulated, and held for BARGE_MIN_MS - playback stops
+                  instantly, the half-finished reply is cancelled, and the words that
+                  triggered the interruption are kept from the pre-roll so the first
+                  syllable is never lost. Wind, fans and street noise fail at least one of
+                  those tests, so they can never cut Hermes off.
+                  """
                   resampler = av.AudioResampler(format="s16", layout="mono", rate=STT_RATE)
+                  gate = SpeechGate()
+                  preroll = collections.deque(maxlen=max(1, int(PREROLL_MS / 20)))
                   speech = bytearray()
-                  silence_ms = 0
-                  speech_ms = 0
+                  speech_ms = 0.0
+                  silence_ms = 0.0
+                  barge_ms = 0.0
+                  min_bytes = int(STT_RATE * 2 * MIN_SPEECH_MS / 1000.0)
 
                   opening = self.opening_line
                   if not opening and self.topic:
-                      opening = "Hi, this is the call we booked about %s. Ready when you are." % self.topic
-                  await self.voice.say(synthesize(opening or GREETING))
+                      opening = (
+                          "Hi, this is the call we booked about %s. Ready when you are."
+                          % self.topic
+                      )
+                  opening = opening or GREETING
+                  self.history.append(("hermes", opening))
+                  await self.speak(opening)
 
                   while not self.done.is_set():
                       try:
@@ -4191,55 +4595,101 @@ jobs:
 
                       for chunk in resampler.resample(frame):
                           pcm = bytes(chunk.planes[0])[: chunk.samples * 2]
+                          if not pcm:
+                              continue
                           ms = (chunk.samples / float(STT_RATE)) * 1000.0
-                          loud = audioop.rms(pcm, 2) > SILENCE_RMS if pcm else False
+                          rms, zcr = gate.observe(pcm)
 
-                          # Ignore the caller's mic while Hermes itself is talking, so
-                          # the agent never transcribes its own voice from the speaker.
+                          # ------------------------------------- Hermes is speaking
                           if self.voice.speaking:
-                              speech.clear()
-                              speech_ms = 0
-                              silence_ms = 0
+                              interrupting = (
+                                  BARGE_IN
+                                  and gate.is_speech(rms, zcr, BARGE_RMS_FACTOR, BARGE_MIN_RMS)
+                                  and gate.modulated
+                              )
+                              if interrupting:
+                                  barge_ms += ms
+                                  preroll.append(pcm)
+                                  if barge_ms >= BARGE_MIN_MS:
+                                      log("barge-in: caller is talking, stopping playback")
+                                      await self.interrupt()
+                                      speech = bytearray(b"".join(preroll))
+                                      speech_ms = len(speech) / 2.0 / STT_RATE * 1000.0
+                                      silence_ms = 0.0
+                                      barge_ms = 0.0
+                                      preroll.clear()
+                                  continue
+                              # A single loud thump is not an interruption. Let the
+                              # evidence decay instead of resetting it, so real speech
+                              # still wins through a brief dip between syllables.
+                              barge_ms = max(0.0, barge_ms - ms)
+                              if barge_ms <= 0.0:
+                                  preroll.clear()
                               continue
 
-                          if loud:
+                          # ----------------------------------------- normal listening
+                          voiced = gate.is_speech(rms, zcr, SPEECH_RMS_FACTOR, SILENCE_RMS)
+
+                          if not voiced and speech_ms == 0.0:
+                              gate.adapt(rms)        # learn the room while it is quiet
+                              preroll.append(pcm)
+                              continue
+
+                          if voiced:
+                              if speech_ms == 0.0 and preroll:
+                                  lead = b"".join(preroll)
+                                  preroll.clear()
+                                  speech.extend(lead)
+                                  speech_ms += len(lead) / 2.0 / STT_RATE * 1000.0
                               speech.extend(pcm)
                               speech_ms += ms
-                              silence_ms = 0
-                          elif speech_ms > 0:
+                              silence_ms = 0.0
+                          else:
                               speech.extend(pcm)
                               silence_ms += ms
 
-                          ready = speech_ms >= MIN_SPEECH_MS and (
-                              silence_ms >= END_SILENCE_MS or speech_ms >= MAX_UTTERANCE_MS
-                          )
-                          if not ready:
+                          finished = silence_ms >= END_SILENCE_MS or speech_ms >= MAX_UTTERANCE_MS
+                          if not finished:
                               continue
 
                           utterance = bytes(speech)
-                          speech.clear()
-                          speech_ms = 0
-                          silence_ms = 0
-                          asyncio.ensure_future(self.handle_utterance(utterance))
+                          speech = bytearray()
+                          speech_ms = 0.0
+                          silence_ms = 0.0
+                          if len(utterance) >= min_bytes:
+                              self.spawn_reply(utterance)
 
               async def handle_utterance(self, pcm16):
                   loop = asyncio.get_event_loop()
-                  text = await loop.run_in_executor(None, transcribe, pcm16)
-                  if not text:
-                      return
-                  log("user:", text)
-                  answer = await loop.run_in_executor(
-                      None, ask_hermes, text, self.user_name, self.topic
-                  )
-                  log("hermes:", answer[:160])
-                  audio = await loop.run_in_executor(None, synthesize, answer)
-                  if audio:
-                      await self.voice.say(audio)
-                  # Keep a transcript in the database so the chat shows the call too.
-                  db_put(
-                      "rtc/%s/transcript/%d" % (self.room, int(time.time() * 1000)),
-                      {"user": text, "hermes": answer},
-                  )
+                  try:
+                      text = await loop.run_in_executor(None, transcribe, pcm16)
+                      if not meaningful(text):
+                          if text:
+                              log("ignored noise transcript:", text[:60])
+                          return
+                      log("user:", text)
+
+                      raw = await loop.run_in_executor(
+                          None, ask_hermes, text, self.user_name, self.topic, list(self.history)
+                      )
+                      answer = clean_reply(raw, self.history)
+                      if not answer:
+                          log("reply was empty after cleaning; staying quiet")
+                          return
+                      log("hermes:", answer[:160])
+
+                      self.history.append(("user", text))
+                      self.history.append(("hermes", answer))
+                      del self.history[: max(0, len(self.history) - HISTORY_TURNS * 2)]
+
+                      await self.speak(answer)
+                      db_put(
+                          "rtc/%s/transcript/%d" % (self.room, int(time.time() * 1000)),
+                          {"user": text, "hermes": answer},
+                      )
+                  except asyncio.CancelledError:
+                      log("reply dropped - the caller interrupted")
+                      raise
 
               # ----------------------------------------------------------------- run
 

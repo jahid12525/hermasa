@@ -4279,9 +4279,6 @@ jobs:
                   log("joining room", self.room, "as", self.self_id)
                   self.pc = RTCPeerConnection(configuration=ICE)
                   self.pc.addTrack(self.voice)
-                  # The app always negotiates a video m-line for screen sharing, so
-                  # accept it - the agent just does not send any video of its own.
-                  self.pc.addTransceiver("video", direction="recvonly")
 
                   @self.pc.on("track")
                   def on_track(track):

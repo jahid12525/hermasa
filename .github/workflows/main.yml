@@ -3352,6 +3352,11 @@ jobs:
           HERMES_CHAT_CMD: hermes chat -q
           HERMES_POOL_URL: http://localhost:4000/v1
           HERMES_POOL_MODEL: pool-auto
+          # How eager the microphone is: low | normal | high | max.
+          # Raise it if words go missing, lower it in a noisy room.
+          HERMES_MIC_SENSITIVITY: ${{ vars.HERMES_MIC_SENSITIVITY || 'high' }}
+          # Set to 0 to go back to loudness based voice detection.
+          HERMES_NEURAL_VAD: ${{ vars.HERMES_NEURAL_VAD || '1' }}
         run: |
           set +e
           echo "Installing WebRTC bridge dependencies..."
@@ -3378,6 +3383,29 @@ jobs:
             echo "local English voice ready: piper amy (female)"
           else
             echo "::warning::piper voice model missing - English will use edge-tts"
+          fi
+
+          # Neural voice activity detection. Deciding "is anyone talking"
+          # from loudness alone is what made callers shout: loudness
+          # describes the room, not whether there is a voice in it. Silero
+          # answers the real question on the CPU in well under a
+          # millisecond per window, so it costs nothing next to WebRTC and
+          # the browser. Package and model are both optional - if either is
+          # missing the bridge quietly uses the old detector instead.
+          python3 -m pip install --quiet --upgrade onnxruntime numpy \
+            >>/tmp/aiortc-install.log 2>&1 || \
+            echo "::warning::onnxruntime unavailable - voice detection falls back to levels"
+          if [ ! -s "$HERMES_HOME/silero_vad.onnx" ]; then
+            for VADURL in \
+              "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx" \
+              "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"; do
+              curl -fsSL "$VADURL" -o "$HERMES_HOME/silero_vad.onnx" 2>/dev/null && break
+            done
+          fi
+          if [ -s "$HERMES_HOME/silero_vad.onnx" ]; then
+            echo "neural voice detection model ready"
+          else
+            echo "::warning::silero_vad.onnx missing - voice detection falls back to levels"
           fi
 
           cat > "$HERMES_HOME/hermes_live_call.py" <<'HERMESCALLEOF'
@@ -3493,6 +3521,17 @@ jobs:
           )
           GROQ_KEY = os.environ.get("GROQ_API_KEY", "").strip()
           STT_MODEL = os.environ.get("HERMES_STT_MODEL", "whisper-large-v3-turbo")
+          # "auto" lets Whisper decide, which is what makes Bangla work without
+          # anyone configuring anything. Pinning this to bn or en is available
+          # but breaks mixed speech, so it is deliberately not the default.
+          STT_LANGUAGE = os.environ.get("HERMES_STT_LANGUAGE", "auto").strip().lower()
+          # Telling Whisper what kind of audio to expect measurably improves
+          # short phone utterances and stops it inventing subtitle credits.
+          STT_PROMPT = os.environ.get(
+              "HERMES_STT_PROMPT",
+              "A natural phone conversation in English and Bangla. "
+              "Short spoken sentences, sometimes mixed together.",
+          )
           TTS_VOICE = os.environ.get("HERMES_TTS_VOICE", "en-US-AriaNeural")
 
           # ---- language aware voices ----------------------------------------------
@@ -3526,8 +3565,8 @@ jobs:
           SAMPLE_RATE = 48000          # what WebRTC carries
           STT_RATE = 16000             # what Whisper wants
           FRAME_SAMPLES = 960          # 20 ms at 48 kHz
-          SILENCE_RMS = 500            # below this counts as silence
-          MIN_SPEECH_MS = 400          # ignore coughs and clicks
+          SILENCE_RMS = 500            # legacy level, still used by barge-in
+          MIN_SPEECH_MS = 260          # ignore coughs and clicks
           END_SILENCE_MS = 900         # this much silence ends an utterance
           MAX_UTTERANCE_MS = 25000     # hard stop so we always answer something
 
@@ -3536,12 +3575,26 @@ jobs:
           # traffic and room tone are steady and land either well below that band
           # (rumble) or well above it (hiss). We track the room noise floor live and
           # judge every 20 ms frame against it instead of against a fixed number.
-          SPEECH_RMS_FACTOR = 1.9      # normal listening: how far above the floor
+          # How eager the microphone is. "high" is the default because the
+          # original numbers were tuned on a loud desk microphone and threw away
+          # an ordinary speaking voice on a phone, which is why callers had to
+          # shout. Set the repo variable HERMES_MIC_SENSITIVITY to low, normal,
+          # high or max to move the whole ladder at once.
+          MIC_SENSITIVITY = os.environ.get(
+              "HERMES_MIC_SENSITIVITY", "high").strip().lower()
+          _SENS = {"low": 1.35, "normal": 1.0, "high": 0.62, "max": 0.40}.get(
+              MIC_SENSITIVITY, 0.62)
+          SPEECH_MIN_RMS = max(50, int(300 * _SENS))   # absolute floor to speak
+          SPEECH_RMS_FACTOR = max(1.15, 1.9 * (0.5 + _SENS / 2.0))
           BARGE_RMS_FACTOR = 3.4       # cutting Hermes off needs much more certainty
           BARGE_MIN_RMS = 850          # absolute floor for an interruption
           BARGE_MIN_MS = 320           # speech must hold this long to interrupt
           ZCR_MIN = 0.020              # below this it is rumble or wind, not a voice
           ZCR_MAX = 0.320              # above this it is hiss, clicks or static
+          # Normal listening gets a wider band than barge-in. Interrupting must
+          # stay fussy, but merely hearing someone should not be.
+          ZCR_MIN_SPEECH = 0.010
+          ZCR_MAX_SPEECH = 0.400
           NOISE_ADAPT = 0.02           # how fast the noise floor follows the room
           MODULATION_MIN = 1.6         # speech swings in level; a fan does not
           PREROLL_MS = 420             # audio kept so the first word is never lost
@@ -4179,6 +4232,29 @@ jobs:
           # --------------------------------------------------------------------------
 
 
+          def boost(pcm16, target=0.55):
+              """
+              Lift a quiet utterance before sending it to the recogniser.
+
+              A WebRTC leg from a phone often arrives far below full scale, and a
+              thin signal is exactly what makes a recogniser swallow the ends of
+              words. The gain is capped, and near-silence is left alone, so hiss
+              in an empty room is never amplified into imaginary speech.
+              """
+              if not pcm16:
+                  return pcm16
+              try:
+                  peak = audioop.max(pcm16, 2)
+                  if peak < 120:
+                      return pcm16
+                  want = target * 32767.0
+                  if peak >= want:
+                      return pcm16
+                  return audioop.mul(pcm16, 2, min(10.0, want / float(peak)))
+              except Exception:
+                  return pcm16
+
+
           def pcm_to_wav(pcm16, rate=STT_RATE):
               buf = io.BytesIO()
               with wave.open(buf, "wb") as w:
@@ -4189,27 +4265,58 @@ jobs:
               return buf.getvalue()
 
 
+          def normalise_lang(value):
+              """Whisper says "bengali" or "bn" depending on its mood."""
+              v = (value or "").strip().lower()
+              if v.startswith("bn") or "bengali" in v or "bangla" in v:
+                  return "bn"
+              if v.startswith("en") or "english" in v:
+                  return "en"
+              return ""
+
+
+          def _stt_fields():
+              fields = {
+                  "model": STT_MODEL,
+                  "response_format": "verbose_json",
+                  "temperature": "0",
+                  "prompt": STT_PROMPT,
+              }
+              if STT_LANGUAGE and STT_LANGUAGE != "auto":
+                  fields["language"] = STT_LANGUAGE
+              return fields
+
+
           def transcribe(pcm16):
-              """Groq Whisper. Returns the recognised text, or an empty string."""
+              """
+              Groq Whisper. Returns (text, language).
+
+              verbose_json is requested because the language Whisper itself
+              detected is by far the most reliable way to choose the reply voice.
+              Guessing from the text alone fails completely when the caller
+              speaks Bangla but it comes back written in Latin letters.
+              """
               if not GROQ_KEY:
                   log("no GROQ_API_KEY - cannot transcribe")
-                  return ""
-              wav = pcm_to_wav(pcm16)
+                  return "", ""
+              wav = pcm_to_wav(boost(pcm16))
               try:
                   r = requests.post(
                       "https://api.groq.com/openai/v1/audio/transcriptions",
                       headers={"Authorization": "Bearer %s" % GROQ_KEY},
                       files={"file": ("speech.wav", wav, "audio/wav")},
-                      data={"model": STT_MODEL, "response_format": "json"},
+                      data=_stt_fields(),
                       timeout=90,
                   )
                   if r.status_code != 200:
                       log("stt http", r.status_code, r.text[:200])
-                      return ""
-                  return (r.json().get("text") or "").strip()
+                      return "", ""
+                  payload = r.json()
+                  return ((payload.get("text") or "").strip(),
+                          normalise_lang(payload.get("language")))
               except Exception as exc:
                   log("stt failed", exc)
-                  return ""
+                  return "", ""
 
 
           EMOJI_RE = re.compile(
@@ -4234,6 +4341,16 @@ jobs:
               "their question. Reply only to the very last thing they said. If you did "
               "not understand, say so in one short sentence and ask them to repeat."
           )
+
+          # The model is told which language to use rather than left to infer it,
+          # because a Banglish transcript reads as English and the answer would
+          # come back in the wrong language.
+          BANGLA_REPLY_RULE = (
+              " The caller is speaking Bangla. Reply in Bangla, in Bengali script, "
+              "the way people actually speak on the phone. Do not switch to "
+              "English unless they do."
+          )
+          ENGLISH_REPLY_RULE = " The caller is speaking English, so reply in English."
 
 
           # Anything that asks for something to actually *happen* has to go through
@@ -4273,9 +4390,9 @@ jobs:
               return bool(ACTION_RE.search(text) or BANGLA_ACTION_RE.search(text))
 
 
-          def holding_line(text):
+          def holding_line(text, lang=""):
               """Something to say so the line is not dead while a task runs."""
-              if detect_language(text) == "bn":
+              if (lang or detect_language(text)) == "bn":
                   return (
                       u"\u09a0\u09bf\u0995 \u0986\u099b\u09c7, "
                       u"\u098f\u0995\u099f\u09c1 \u09b8\u09ae\u09df \u09a6\u09bf\u09a8\u0964"
@@ -4393,12 +4510,13 @@ jobs:
               return answer
 
 
-          def ask_hermes(text, user_name, topic="", history=()):
+          def ask_hermes(text, user_name, topic="", history=(), lang="en"):
               """Send the caller's last line to Hermes and return the spoken answer."""
               about = " This call is about: %s." % topic if topic else ""
               system = SYSTEM_PROMPT + " You are talking to %s.%s" % (
                   user_name or "the caller", about
               )
+              system += BANGLA_REPLY_RULE if lang == "bn" else ENGLISH_REPLY_RULE
 
               messages = [{"role": "system", "content": system}]
               for who, line in list(history)[-HISTORY_TURNS * 2:]:
@@ -4460,6 +4578,38 @@ jobs:
               # A stray Bangla character inside an English sentence should not flip the
               # whole line over to the Bangla voice.
               return "bn" if letters and bengali / float(letters) >= 0.30 else "en"
+
+
+          # Bangla typed in Latin letters. Whisper does this whenever the audio is
+          # short or noisy, and the reply would then come back in English even
+          # though the caller never spoke a word of it.
+          ROMAN_BANGLA_RE = re.compile(
+              r"\b(ami|amar|amake|tumi|tomar|apni|apnar|kemon|acho|achen|ache|"
+              r"korbo|korte|korba|kotha|bolo|bolba|bolbo|dao|daw|dibe|dio|keno|"
+              r"kivabe|kothay|kobe|ekhon|kal|aaj|aj|valo|bhalo|thik|hobe|hoye|"
+              r"nai|nei|jonno|lagbe|chai|dorkar|bujhi|bujhte|shuno|shunte|khub|"
+              r"onek|kichu|kore|hocche|hoyeche)\b",
+              re.IGNORECASE,
+          )
+
+
+          def caller_language(text, stt_lang=""):
+              """
+              Which language to answer in.
+
+              Whisper's own verdict is trusted first, because it heard the audio
+              and we only ever see the text. Bengali script is conclusive on its
+              own. Banglish comes last and needs two hits, so a single "na" or
+              "thik" inside an English sentence cannot flip the whole call over.
+              """
+              lang = normalise_lang(stt_lang)
+              if lang:
+                  return lang
+              if detect_language(text) == "bn":
+                  return "bn"
+              if len(ROMAN_BANGLA_RE.findall(text or "")) >= 2:
+                  return "bn"
+              return "en"
 
 
           def split_by_language(text):
@@ -4607,6 +4757,155 @@ jobs:
           # --------------------------------------------------------------------------
 
 
+          # ---- neural voice activity detection -------------------------------------
+          # Silero VAD is a small ONNX model that answers one question: is there a
+          # human voice in this 32 ms window? That is a far better question than "is
+          # this loud", which is what the level based gate asks and why an ordinary
+          # speaking voice used to be thrown away - loudness describes the room, not
+          # whether anybody is talking. It is built for CPU and needs well under a
+          # millisecond per window on one thread, so it costs nothing next to WebRTC,
+          # the recogniser and the browser the agent drives.
+          #
+          # If onnxruntime or the model file is missing the bridge keeps working and
+          # falls back to the level based gate, so a failed download can never take
+          # live calls down.
+          NEURAL_VAD = os.environ.get("HERMES_NEURAL_VAD", "1") != "0"
+          VAD_MODEL = os.environ.get(
+              "HERMES_VAD_MODEL",
+              os.path.join(
+                  os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
+                  "silero_vad.onnx",
+              ),
+          )
+          VAD_WINDOW = 512             # samples at 16 kHz; what the model expects
+          VAD_START_P = 0.50           # confidence needed to open an utterance
+          VAD_KEEP_P = 0.32            # lower bar to stay inside one, so a pause
+                                       # between words does not end the sentence
+          VAD_BARGE_P = 0.85           # cutting Hermes off needs real confidence
+          VAD_MIN_RMS = 45             # ignore amplified digital silence
+
+
+          class NeuralVad:
+              """
+              Silero VAD, wrapped so nothing about it can break a call.
+
+              The call hands us 20 ms frames but the model wants 512 sample windows, so
+              frames are buffered and consumed a window at a time. feed() returns the
+              highest probability found in the audio it was given rather than the last
+              one, because a short word like "na" can sit inside a single window and be
+              averaged away otherwise.
+
+              Two model generations are handled: v5 carries one combined state tensor,
+              v4 carried separate h and c tensors. The input names tell us which.
+              """
+
+              def __init__(self, path=None):
+                  self.session = None
+                  self.np = None
+                  self.buffer = bytearray()
+                  self.prob = 0.0
+                  self.names = set()
+                  path = path or VAD_MODEL
+                  if not NEURAL_VAD:
+                      log("neural vad disabled by HERMES_NEURAL_VAD=0")
+                      return
+                  try:
+                      import numpy
+                      import onnxruntime
+                  except Exception as exc:
+                      log("neural vad unavailable (%s) - using level based detection"
+                          % exc.__class__.__name__)
+                      return
+                  if not os.path.exists(path):
+                      log("neural vad model missing at %s - using level based detection"
+                          % path)
+                      return
+                  try:
+                      opts = onnxruntime.SessionOptions()
+                      # One thread each way. The runner already shares its cores with
+                      # the browser and the model pool, and this model is far too small
+                      # to benefit from more.
+                      opts.intra_op_num_threads = 1
+                      opts.inter_op_num_threads = 1
+                      opts.log_severity_level = 3
+                      self.np = numpy
+                      self.session = onnxruntime.InferenceSession(
+                          path, sess_options=opts, providers=["CPUExecutionProvider"]
+                      )
+                      self.names = set(i.name for i in self.session.get_inputs())
+                      self.reset()
+                      log("neural vad ready (silero on cpu)")
+                  except Exception as exc:
+                      log("neural vad failed to load - using level based detection", exc)
+                      self.session = None
+
+              @property
+              def ready(self):
+                  return self.session is not None
+
+              def reset(self):
+                  """
+                  Clear the recurrent state.
+
+                  Called between turns, because a long stretch of Hermes' own echo
+                  would otherwise colour the model's view of the next utterance.
+                  """
+                  if self.np is None:
+                      return
+                  z = self.np.zeros
+                  self.state = z((2, 1, 128), dtype=self.np.float32)
+                  self.h = z((2, 1, 64), dtype=self.np.float32)
+                  self.c = z((2, 1, 64), dtype=self.np.float32)
+                  del self.buffer[:]
+                  self.prob = 0.0
+
+              def feed(self, pcm16):
+                  """Highest speech probability in this audio, or None when unavailable."""
+                  if not self.ready:
+                      return None
+                  self.buffer.extend(pcm16)
+                  need = VAD_WINDOW * 2
+                  best = None
+                  while len(self.buffer) >= need:
+                      window = bytes(self.buffer[:need])
+                      del self.buffer[:need]
+                      p = self.run(window)
+                      if p is None:
+                          return None
+                      best = p if best is None else max(best, p)
+                  if best is not None:
+                      self.prob = best
+                  return best
+
+              def run(self, window):
+                  np = self.np
+                  samples = (np.frombuffer(window, dtype=np.int16)
+                             .astype(np.float32) / 32768.0)
+                  feed = {
+                      "input": samples.reshape(1, -1),
+                      "sr": np.array(STT_RATE, dtype=np.int64),
+                  }
+                  if "state" in self.names:
+                      feed["state"] = self.state
+                  else:
+                      feed["h"] = self.h
+                      feed["c"] = self.c
+                  try:
+                      out = self.session.run(None, feed)
+                  except Exception as exc:
+                      # One bad inference must not silence the caller for the rest of
+                      # the call, so drop to the level based gate for good.
+                      log("neural vad error - switching to level based detection", exc)
+                      self.session = None
+                      return None
+                  if "state" in self.names:
+                      if len(out) > 1:
+                          self.state = out[1]
+                  elif len(out) > 2:
+                      self.h, self.c = out[1], out[2]
+                  return float(np.asarray(out[0]).reshape(-1)[0])
+
+
           def zero_crossing_rate(pcm16):
               """Fraction of samples where the waveform crosses zero.
 
@@ -4640,7 +4939,9 @@ jobs:
               """
 
               def __init__(self):
-                  self.floor = float(SILENCE_RMS)
+                  # Start at the speaking floor rather than the old silence
+                  # level, so the very first sentence of a call is heard.
+                  self.floor = float(SPEECH_MIN_RMS)
                   self.recent = collections.deque(maxlen=25)   # ~500 ms of levels
 
               def observe(self, pcm16):
@@ -4652,7 +4953,7 @@ jobs:
                   """Follow the room. Drops fast, rises slowly, never runs away."""
                   rate = NOISE_ADAPT if rms > self.floor else NOISE_ADAPT * 4
                   self.floor = (1.0 - rate) * self.floor + rate * rms
-                  self.floor = max(60.0, min(self.floor, 5000.0))
+                  self.floor = max(30.0, min(self.floor, 5000.0))
 
               @property
               def modulated(self):
@@ -4662,10 +4963,11 @@ jobs:
                   loud = max(self.recent)
                   return loud > (quiet + 1) * MODULATION_MIN
 
-              def is_speech(self, rms, zcr, factor, minimum):
+              def is_speech(self, rms, zcr, factor, minimum,
+                            zcr_min=ZCR_MIN, zcr_max=ZCR_MAX):
                   if rms <= max(minimum, self.floor * factor):
                       return False
-                  return ZCR_MIN <= zcr <= ZCR_MAX
+                  return zcr_min <= zcr <= zcr_max
 
 
           # --------------------------------------------------------------------------
@@ -4901,6 +5203,8 @@ jobs:
                   """
                   resampler = av.AudioResampler(format="s16", layout="mono", rate=STT_RATE)
                   gate = SpeechGate()
+                  vad = NeuralVad()
+                  was_speaking = False
                   preroll = collections.deque(maxlen=max(1, int(PREROLL_MS / 20)))
                   speech = bytearray()
                   speech_ms = 0.0
@@ -4933,6 +5237,17 @@ jobs:
                           ms = (chunk.samples / float(STT_RATE)) * 1000.0
                           rms, zcr = gate.observe(pcm)
 
+                          # Forget the echo as soon as Hermes stops talking, so
+                          # the next utterance is judged on its own.
+                          if self.voice.speaking:
+                              was_speaking = True
+                          elif was_speaking:
+                              vad.reset()
+                              was_speaking = False
+
+                          vad.feed(pcm)
+                          voice_p = vad.prob if vad.ready else None
+
                           # ------------------------------------- Hermes is speaking
                           if self.voice.speaking:
                               # Their microphone hears Hermes coming back out of
@@ -4953,6 +5268,10 @@ jobs:
                                       BARGE_MIN_RMS,
                                   )
                                   and gate.modulated
+                                  # The model has to agree that this is a voice.
+                                  # Wind, fans and door slams can pass a
+                                  # loudness test but never this one.
+                                  and (voice_p is None or voice_p >= VAD_BARGE_P)
                               )
                               if interrupting:
                                   barge_ms += ms
@@ -4975,7 +5294,19 @@ jobs:
                               continue
 
                           # ----------------------------------------- normal listening
-                          voiced = gate.is_speech(rms, zcr, SPEECH_RMS_FACTOR, SILENCE_RMS)
+                          if voice_p is None:
+                              # No model available: fall back to levels.
+                              voiced = gate.is_speech(
+                                  rms, zcr, SPEECH_RMS_FACTOR, SPEECH_MIN_RMS,
+                                  ZCR_MIN_SPEECH, ZCR_MAX_SPEECH,
+                              )
+                          else:
+                              # Once an utterance is open the bar drops, so a
+                              # breath between words does not end the sentence
+                              # early. The level check only stops amplified
+                              # silence from being treated as speech.
+                              want = VAD_KEEP_P if speech_ms > 0.0 else VAD_START_P
+                              voiced = voice_p >= want and rms >= VAD_MIN_RMS
 
                           if not voiced and speech_ms == 0.0:
                               gate.adapt(rms)        # learn the room while it is quiet
@@ -5003,27 +5334,39 @@ jobs:
                           speech = bytearray()
                           speech_ms = 0.0
                           silence_ms = 0.0
+                          heard_ms = len(utterance) / 2.0 / STT_RATE * 1000.0
                           if len(utterance) >= min_bytes:
+                              log("heard %d ms of speech (%s)"
+                                  % (heard_ms,
+                                     "voice %.2f" % vad.prob if vad.ready
+                                     else "room floor %d" % int(gate.floor)))
                               self.spawn_reply(utterance)
+                          else:
+                              log("too short to transcribe: %d ms, need %d - raise "
+                                  "HERMES_MIC_SENSITIVITY if this repeats"
+                                  % (heard_ms, MIN_SPEECH_MS))
 
               async def handle_utterance(self, pcm16):
                   loop = asyncio.get_event_loop()
                   try:
-                      text = await loop.run_in_executor(None, transcribe, pcm16)
+                      text, stt_lang = await loop.run_in_executor(
+                          None, transcribe, pcm16)
                       if not meaningful(text):
                           if text:
                               log("ignored noise transcript:", text[:60])
                           return
-                      log("user:", text)
+                      lang = caller_language(text, stt_lang)
+                      log("user [%s]:" % lang, text)
 
                       if needs_agent(text):
                           # Browser and machine work takes real seconds. Say something
                           # first so the caller is not left listening to dead air.
                           log("routing to the Hermes agent (task request)")
-                          await self.speak(holding_line(text))
+                          await self.speak(holding_line(text, lang))
 
                       raw = await loop.run_in_executor(
-                          None, ask_hermes, text, self.user_name, self.topic, list(self.history)
+                          None, ask_hermes, text, self.user_name, self.topic,
+                          list(self.history), lang,
                       )
                       answer = clean_reply(raw, self.history)
                       if not answer:

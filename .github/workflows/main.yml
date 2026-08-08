@@ -333,48 +333,19 @@ jobs:
           if [ -d /tmp/camofox-browser ]; then
             mkdir -p "$HERMES_HOME/data/camofox-profiles"
             ( cd /tmp/camofox-browser && timeout 600 npm install > /tmp/camofox-npm.log 2>&1 ) \
-              || { echo "npm install failed - retrying once"; \
-                   ( cd /tmp/camofox-browser && timeout 600 npm install >> /tmp/camofox-npm.log 2>&1 ) \
-                   || echo "::warning::camofox-browser npm install failed twice - see /tmp/camofox-npm.log"; }
-            # fix49: ONE canonical, idempotent launcher for the :9377 server.
-            # diagnostic: print the restart/idle knobs THIS clone actually
-            # reads, so a silent upstream rename shows up in the run log
-            grep -n "RESTART_THRESHOLD\|IDLE_TIMEOUT\|INACTIVITY" /tmp/camofox-browser/lib/config.js 2>/dev/null | head -20 || true
-            # Reused by this boot start, the mid-run recovery watchdog below
-            # and the agent itself (AGENTS.md tells it to run this script
-            # instead of claiming "camoufox is not running").
-            cat > /tmp/camofox-restart.sh <<EOSTART
-          #!/bin/bash
-          if curl -sf http://127.0.0.1:9377/health >/dev/null 2>&1 \\
-             || curl -sf http://127.0.0.1:9377/tabs >/dev/null 2>&1; then
-            echo "camofox already up on :9377"; exit 0
-          fi
-          pkill -f "node.*camofox-browser" 2>/dev/null; sleep 2
-          cd /tmp/camofox-browser || exit 1
-          # fix50: NEVER stop/restart the browser mid-run:
-          #  - BROWSER_IDLE_TIMEOUT_MS=0 -> idle kill fully OFF (0 = never, per docs)
-          #  - session/tab inactivity raised to 7 days (longer than any run)
-          #  - memory-pressure restart thresholds set unreachably high
-          #  - MAX_OLD_SPACE_SIZE=2048 -> Node heap cannot OOM while VNC streams
-          CAMOFOX_PORT=9377 \\
-            CAMOFOX_BIND_HOST=127.0.0.1 \\
-            CAMOFOX_PROFILE_DIR="$HERMES_HOME/data/camofox-profiles" \\
-            ENABLE_VNC=1 VNC_RESOLUTION=1920x1080 \\
-            VNC_PASSWORD="${PANEL_TOKEN:-hermes99}" \\
-            VNC_PORT=5901 NOVNC_PORT=6081 \\
-            SESSION_TIMEOUT_MS=604800000 TAB_INACTIVITY_MS=604800000 \\
-            BROWSER_IDLE_TIMEOUT_MS=0 \\
-            NATIVE_MEM_RESTART_THRESHOLD_MB=999999 \\
-            BROWSER_RSS_RESTART_THRESHOLD_MB=999999 \\
-            MAX_OLD_SPACE_SIZE=2048 \\
-            nohup npm start >> /tmp/camofox-srv.log 2>&1 &
-          echo "camofox (re)start issued on :9377"
-          EOSTART
-            chmod +x /tmp/camofox-restart.sh
-            bash /tmp/camofox-restart.sh
-            # first boot can be slow (big npm tree + engine warm-up):
-            # wait up to 4 minutes, not 2, before declaring it down.
-            for i in $(seq 1 80); do
+              || echo "::warning::camofox-browser npm install failed - see /tmp/camofox-npm.log"
+            ( cd /tmp/camofox-browser && CAMOFOX_PORT=9377 \
+                CAMOFOX_BIND_HOST=127.0.0.1 \
+                CAMOFOX_PROFILE_DIR="$HERMES_HOME/data/camofox-profiles" \
+                ENABLE_VNC=1 VNC_RESOLUTION=1920x1080 \
+                VNC_PASSWORD="${PANEL_TOKEN:-hermes99}" \
+                VNC_PORT=5901 NOVNC_PORT=6081 \
+                SESSION_TIMEOUT_MS=86400000 TAB_INACTIVITY_MS=86400000 \
+                BROWSER_IDLE_TIMEOUT_MS=86400000 \
+                NATIVE_MEM_RESTART_THRESHOLD_MB=2048 \
+                BROWSER_RSS_RESTART_THRESHOLD_MB=4096 \
+                nohup npm start > /tmp/camofox-srv.log 2>&1 & )
+            for i in $(seq 1 40); do
               if curl -sf http://127.0.0.1:9377/health > /dev/null 2>&1 \
                  || curl -sf http://127.0.0.1:9377/tabs > /dev/null 2>&1; then
                 echo "http://127.0.0.1:9377" > /tmp/camofox_url
@@ -383,11 +354,6 @@ jobs:
               fi
               sleep 3
             done
-            if [ ! -f /tmp/camofox_url ]; then
-              echo "── Camofox did NOT come up - dumping logs for debugging ──"
-              tail -n 40 /tmp/camofox-npm.log 2>/dev/null || true
-              tail -n 60 /tmp/camofox-srv.log 2>/dev/null || true
-            fi
           fi
           # fix43: WARM START the browser engine NOW + keep it alive, so the
           # noVNC view on :6081 is actually connectable from minute 1.
@@ -397,21 +363,25 @@ jobs:
           # session/tab/idle timeouts to 24h and the auto-restart
           # thresholds (native-mem 300MB -> 2GB, browser RSS 1.5GB -> 4GB)
           # that were closing ALL windows mid-login (the Facebook vanish).
-          # The keepalive (python) ONLY revives the engine if it is truly
-          # down, and opens ONE placeholder tab (userId boss-view) a single
-          # time so a window is ALWAYS rendered (no black screen - the
-          # display has no window manager so no-window = black). It NEVER
-          # refreshes or reloads anything (fix51): timers are fully off, so
-          # the browser stays exactly as it was left.
+          # The keepalive (python) still revives the engine if down AND
+          # keeps ONE placeholder tab (userId boss-view) refreshed every 2
+          # min, so the tab-inactivity (5 min) and engine-idle (5 min)
+          # timers never fire: a window is ALWAYS rendered (no black screen,
+          # the display has no window manager so no-window = black) and the
+          # engine never dies (no VNC disconnect cycle).
           # fix47: it also exports boss-view cookies to the data-repo dir
           # every cycle and re-imports them into fresh sessions, so logins
           # survive engine restarts AND whole machine runs.
-          cat > /tmp/camofox-keepalive.py <<'PYKA'
+          if [ -f /tmp/camofox_url ]; then
+            curl -s --max-time 30 -X POST http://127.0.0.1:9377/start \
+              -H 'Content-Type: application/json' -d '{}' \
+              > /tmp/camofox-warmstart.log 2>&1 || true
+            cat > /tmp/camofox-keepalive.py <<'PYKA'
           #!/usr/bin/env python3
           # Keep the Camofox engine AND one placeholder tab alive so the
           # noVNC view always shows a browser window (no black screen) and
           # x11vnc never dies from the 5-min idle shutdown (no disconnects).
-          import json, os, subprocess, time, urllib.request
+          import json, os, time, urllib.request
 
           BASE = "http://127.0.0.1:9377"
           STATE = (os.environ.get("CAMOFOX_STATE_FILE") or
@@ -469,41 +439,21 @@ jobs:
               except Exception:
                   pass
 
-          def engine_up():
-              # Trust the same /tabs health check the restart script uses.
-              # A mis-shaped /vnc/status reply must NEVER trigger /start
-              # spam (that showed up as "the browser restarts every minute").
-              try:
-                  req("GET", "/tabs", timeout=8)
-                  return True
-              except Exception:
-                  pass
-              try:
-                  st = req("GET", "/vnc/status", timeout=8)
-                  return bool(st.get("running") or st.get("active") or st.get("up"))
-              except Exception:
-                  return False
-
           tab = None
           while True:
               try:
-                  if not engine_up():
-                      # engine (or whole server) truly down -> revive it,
-                      # then warm-start the browser. NEVER restart when up.
-                      try:
-                          subprocess.call(["bash", "/tmp/camofox-restart.sh"], timeout=180)
-                      except Exception:
-                          pass
+                  st = req("GET", "/vnc/status", timeout=8)
+                  if not st.get("running"):
                       try:
                           req("POST", "/start", {}, timeout=40)
                       except Exception:
                           pass
                       time.sleep(15)
-                      tab = None
-                  # fix51: NO auto tab refresh - EVER. Idle/inactivity timers
-                  # are fully off, so nothing needs "keeping alive". The
-                  # placeholder tab is created ONCE (below) and never touched
-                  # again; every page stays EXACTLY as you or the agent left it.
+                  if tab:
+                      try:
+                          req("POST", "/tabs/" + str(tab) + "/refresh", {}, timeout=30)
+                      except Exception:
+                          tab = None
                   if not tab:
                       for target in (IDLE_PAGE, "about:blank"):
                           try:
@@ -520,12 +470,8 @@ jobs:
                   save_cookies()
               except Exception:
                   pass
-              time.sleep(60)
+              time.sleep(120)
           PYKA
-          if [ -f /tmp/camofox_url ]; then
-            curl -s --max-time 30 -X POST http://127.0.0.1:9377/start \
-              -H 'Content-Type: application/json' -d '{}' \
-              > /tmp/camofox-warmstart.log 2>&1 || true
             CAMOFOX_STATE_FILE="$HERMES_HOME/data/camofox-profiles/boss-view-storage.json" nohup python3 /tmp/camofox-keepalive.py > /tmp/camofox-keepalive.log 2>&1 &
             echo "Camofox warm start sent; keepalive keeps engine + placeholder tab alive (no more idle shutdown)"
           fi
@@ -547,43 +493,6 @@ jobs:
             fi
           else
             echo "Camofox is the default browser - Chrome NOT started"
-          fi
-
-          # ── fix49 MID-RUN RECOVERY: if Camofox did NOT come up at boot,
-          # keep retrying in the background instead of dooming the whole
-          # 5.5h run to the Chrome fallback. On success it re-points .env +
-          # hermes config at Camofox, kills the fallback Chrome and starts
-          # the keepalive - the agent returns to anti-detect browsing
-          # without a restart.
-          if [ ! -f /tmp/camofox_url ] && [ -d /tmp/camofox-browser ]; then
-            cat > /tmp/camofox-recover.sh <<'EORECOV'
-          #!/bin/bash
-          for i in $(seq 1 30); do
-            sleep 120
-            [ -f /tmp/camofox_url ] && exit 0
-            bash /tmp/camofox-restart.sh >/dev/null 2>&1
-            sleep 40
-            if curl -sf http://127.0.0.1:9377/health >/dev/null 2>&1 \
-               || curl -sf http://127.0.0.1:9377/tabs >/dev/null 2>&1; then
-              echo "http://127.0.0.1:9377" > /tmp/camofox_url
-              if [ -f "$HERMES_HOME/.env" ] && ! grep -q '^CAMOFOX_URL=' "$HERMES_HOME/.env"; then
-                echo "CAMOFOX_URL=http://127.0.0.1:9377" >> "$HERMES_HOME/.env"
-                echo "CAMOFOX_USER_ID=boss-view" >> "$HERMES_HOME/.env"
-              fi
-              hermes config unset browser.cdp_url >/dev/null 2>&1 || true
-              hermes config set browser.camofox.user_id boss-view >/dev/null 2>&1 || true
-              pkill -f 'remote-debugging-port=9223' 2>/dev/null || true
-              curl -s --max-time 30 -X POST http://127.0.0.1:9377/start -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1 || true
-              CAMOFOX_STATE_FILE="$HERMES_HOME/data/camofox-profiles/boss-view-storage.json" nohup python3 /tmp/camofox-keepalive.py > /tmp/camofox-keepalive.log 2>&1 &
-              echo "$(date) camofox recovered - switched agent back from Chrome fallback"
-              exit 0
-            fi
-          done
-          echo "$(date) camofox never came up - staying on Chrome fallback"
-          EORECOV
-            chmod +x /tmp/camofox-recover.sh
-            nohup bash /tmp/camofox-recover.sh > /tmp/camofox-recover.log 2>&1 &
-            echo "camofox recovery watchdog started (retries every ~2.5 min)"
           fi
 
           # ── LIVE DESKTOP VIEW: watch the agent work, from your browser ──
@@ -1354,8 +1263,8 @@ jobs:
             # ephemeral userId per task = fresh logged-out WINDOW each time
             # (the "multiple windows" + "ignores my logins" complaints).
             # session_key stays UNSET on purpose: Hermes opens its OWN tab
-            # per task instead of adopting the placeholder tab. (Keepalive
-            # auto-refresh is REMOVED - fix51 - no tab is ever reloaded.)
+            # per task instead of adopting the placeholder tab, so the
+            # keepalive's 2-min refresh never reloads the agent's page.
             echo "CAMOFOX_USER_ID=boss-view" >> "$HERMES_HOME/.env"
             echo "CAMOFOX_URL set - built-in browsing is anti-detect (shared boss-view session)"
           fi
@@ -1451,25 +1360,6 @@ jobs:
             unlike the built-in Camofox tools). The visible Chrome
             (CDP http://127.0.0.1:9223) is a last resort for CDP-only work;
             assume sites can detect it.
-          - CAMOFOX "NOT RUNNING"? CHECK, NEVER GUESS: your built-in browser
-            tools' Camofox window lives on its OWN private display (the
-            "Camofox browser" noVNC :6081 link) - it is NEVER visible on the
-            main :99 desktop. A Camoufox window that IS visible on the live
-            desktop is the SEPARATE script browser (ws://127.0.0.1:9222) - a
-            different process, so it proves NOTHING about the built-in
-            backend. Never conclude "camoufox is not running" from a failed
-            tool call or from looking at any desktop. Check the real backend:
-              curl -s http://127.0.0.1:9377/health   (or /tabs)
-            If it answers: Camofox IS running - retry your built-in
-            browser_* tool (e.g. open https://gmail.com with it directly).
-            If it does NOT answer: restart it yourself, then retry:
-              bash /tmp/camofox-restart.sh   (wait ~30s, re-check /health)
-            Only if the restart + health check BOTH still fail, tell the
-            user Camofox is down and fall back to a playwright/camoufox
-            script on ws://127.0.0.1:9222/hermes (headless=False) or, as a
-            LAST resort, Chrome CDP :9223. NEVER launch your own new
-            Chrome/Chromium/browser-use instance for a task the built-in
-            browser tools can do.
           - TYPING INTO WEB APPS (Facebook, Messenger, WhatsApp Web,
             Instagram, X, Gmail, etc): NEVER inject text with CDP or
             JavaScript (element.value=..., execCommand, innerHTML, synthetic
@@ -1577,21 +1467,11 @@ jobs:
           # came up (CAMOFOX_URL in .env routes ALL browser_* tools through
           # it). Otherwise fall back to the visible Chrome over CDP.
           if [ -f /tmp/camofox_url ]; then
-            # fix49: UNSET the Chrome CDP pin FIRST. hermes config persists
-            # in the data repo across runs, so ONE bad run that fell back to
-            # Chrome left browser.cdp_url set FOREVER: every later run then
-            # drove Chrome (or errored on the dead :9223 port - "browser is
-            # not running / unable to start") even while Camofox was up and
-            # visible. Same stale-config trap as the providers.* unsets above.
-            hermes config unset browser.cdp_url || true
             # fix48: same shared identity in config.yaml too (the .env var
             # takes precedence; this covers direct hermes runs/doctor)
             hermes config set browser.camofox.user_id boss-view
             echo "Built-in browser tools: Camofox anti-detect (no CDP beacons) - shared boss-view session"
           else
-            # mirror-image cleanup: drop the camofox identity so built-in
-            # tools never sit waiting on a dead :9377 server in fallback mode
-            hermes config unset browser.camofox.user_id || true
             hermes config set browser.cdp_url "http://127.0.0.1:9223"
             echo "Built-in browser tools: visible Chrome fallback (CDP :9223)"
           fi
@@ -3327,758 +3207,23 @@ jobs:
           curl -fs http://127.0.0.1:7777/ >/dev/null 2>&1 || { echo '::warning::voice reply service failed to start'; cat /tmp/jarvis.log; }
           echo "Voice reply service running locally on 127.0.0.1:7777 (powers Telegram/Slack voice + inline file delivery). Jarvis web panel removed - no public tunnel."
 
-      # ── 10. Pre-generated audio calls to the phone (no live call) ──
-      # The live two-way voice call was removed on purpose. Hermes now writes
-      # a sentence, edge-tts renders it, and the audio travels inside the ring
-      # itself - the webhook call path the app has always played reliably.
-      - name: Start Hermes audio call sender
-        continue-on-error: true
-        env:
-          HERMES_DB_URL: ${{ secrets.AGENT_AI_DB_URL || 'https://shawall-default-rtdb.firebaseio.com' }}
-          HERMES_DB_TOKEN: ${{ secrets.AGENT_AI_DB_TOKEN }}
-          # Who gets called. Set this so the call reaches you and nobody else.
-          HERMES_USER_ID: ${{ secrets.HERMES_USER_ID }}
-          # Optional. Left unset, the owner's first bot places the call.
-          HERMES_BOT_ID: ${{ secrets.HERMES_BOT_ID }}
-          HERMES_AGENT_NAME: Hermes
-          HERMES_TTS_VOICE_EN: ${{ vars.HERMES_TTS_VOICE_EN || 'en-US-AriaNeural' }}
-          HERMES_TTS_VOICE_BN: ${{ vars.HERMES_TTS_VOICE_BN || 'bn-BD-NabanitaNeural' }}
-          HERMES_TZ: Asia/Dhaka
-        run: |
-          set +e
-          echo "Installing the audio call sender..."
-          python3 -m pip install --quiet --upgrade requests edge-tts \
-            >/tmp/audio-call-install.log 2>&1 || \
-            echo "::warning::edge-tts install failed - calls will ring with text only"
-          if command -v edge-tts >/dev/null 2>&1; then
-            echo "call voice ready: edge-tts (female, bangla and english)"
-          else
-            echo "::warning::edge-tts is not on PATH - the phone will read the text itself"
-          fi
 
-          cat > "$HERMES_HOME/hermes_tts_call.py" <<'HERMESTTSCALLEOF'
-          #!/usr/bin/env python3
-          """
-          Hermes pre-generated audio call sender
-          ======================================
 
-          The live two-way voice call is gone. This is the small, reliable path that
-          replaces it: Hermes writes a sentence, edge-tts turns it into an mp3, and the
-          mp3 travels inside the ring itself so the phone plays it the moment the user
-          accepts. No WebRTC, no speech recognition, no microphone, nothing to stall.
 
-              calls/{userId} = { callType: "BOT_TTS", ttsText, ttsAudioBase64, ... }
 
-          The app has always understood that node - it is the webhook call path that
-          already worked - so nothing on the phone has to change for this to ring.
 
-          What it does
-          ------------
-          * `now`   ring the user straight away with a spoken line
-          * `at`    book a call for later, stored in the database so a runner restart
-                    does not lose it
-          * `serve` the background loop that fires booked calls and drains the
-                    webhook queue at hermesOutgoing/
 
-          Environment
-          -----------
-              HERMES_DB_URL     Firebase Realtime Database URL (same one the app uses)
-              HERMES_DB_TOKEN   optional ?auth= token when your rules require it
-              HERMES_USER_ID    who to ring by default
-              HERMES_BOT_ID     which bot the call comes from (optional)
-              HERMES_AGENT_NAME display name shown while ringing   (default "Hermes")
-              HERMES_TTS_VOICE_EN / HERMES_TTS_VOICE_BN  edge-tts voices
-              HERMES_TZ         default Asia/Dhaka
-          """
 
-          import argparse
-          import base64
-          import json
-          import os
-          import re
-          import shutil
-          import subprocess
-          import sys
-          import tempfile
-          import time
-          import uuid
-          from datetime import datetime, timedelta
 
-          try:
-              from zoneinfo import ZoneInfo
-          except Exception:  # pragma: no cover - very old python
-              ZoneInfo = None
 
-          import requests
 
-          # --------------------------------------------------------------------------
-          # configuration
-          # --------------------------------------------------------------------------
 
-          DB_URL = os.environ.get(
-              "HERMES_DB_URL",
-              "https://shawall-default-rtdb.firebaseio.com").rstrip("/")
-          DB_TOKEN = os.environ.get("HERMES_DB_TOKEN", "").strip()
-          DEFAULT_USER_ID = (os.environ.get("HERMES_USER_ID", "").strip()
-                             or os.environ.get("AGENT_AI_USER", "").strip())
-          AGENT_NAME = os.environ.get("HERMES_AGENT_NAME", "Hermes")
-          BOT_ID = os.environ.get("HERMES_BOT_ID", "hermes").strip() or "hermes"
-          BOT_ID_PINNED = bool(os.environ.get("HERMES_BOT_ID", "").strip())
 
-          # One female voice per language. Bangla text is detected from its own
-          # script, so a Bangla line is never read out by an English voice.
-          VOICE_EN = os.environ.get("HERMES_TTS_VOICE_EN", "en-US-AriaNeural").strip()
-          VOICE_BN = os.environ.get("HERMES_TTS_VOICE_BN", "bn-BD-NabanitaNeural").strip()
-          BANGLA_RE = re.compile("[\u0980-\u09ff]")
 
-          LOCAL_TZ = os.environ.get("HERMES_TZ", "Asia/Dhaka")
-          # A booked call fired hours late is worse than no call, so anything later
-          # than this is marked missed instead.
-          LATE_GRACE_MIN = int(os.environ.get("HERMES_LATE_GRACE_MIN", "180"))
-          SCHED_TICK_S = int(os.environ.get("HERMES_SCHED_TICK_S", "20"))
-          # edge-tts is fast, but a runner under load can be slow.
-          TTS_TIMEOUT_S = int(os.environ.get("HERMES_TTS_TIMEOUT_S", "120"))
-          # Firebase stores the audio inline, so keep a spoken line sane.
-          MAX_SAY_CHARS = int(os.environ.get("HERMES_MAX_SAY_CHARS", "600"))
 
 
-          def log(*parts):
-              print("[hermes-call]", *parts, flush=True)
 
 
-          def _url(path):
-              url = "%s/%s.json" % (DB_URL, path.strip("/"))
-              if DB_TOKEN:
-                  url += "?auth=%s" % DB_TOKEN
-              return url
-
-
-          def db_get(path):
-              try:
-                  r = requests.get(_url(path), timeout=15)
-                  if r.status_code != 200:
-                      return None
-                  body = r.text.strip()
-                  if not body or body == "null":
-                      return None
-                  return json.loads(body)
-              except Exception as exc:
-                  log("db_get failed", path, exc)
-                  return None
-
-
-          def db_put(path, value):
-              try:
-                  requests.put(_url(path), data=json.dumps(value), timeout=15)
-                  return True
-              except Exception as exc:
-                  log("db_put failed", path, exc)
-                  return False
-
-
-          def db_delete(path):
-              try:
-                  requests.delete(_url(path), timeout=15)
-                  return True
-              except Exception:
-                  return False
-
-
-          def tz():
-              if ZoneInfo is None:
-                  return None
-              try:
-                  return ZoneInfo(LOCAL_TZ)
-              except Exception:
-                  return None
-
-
-          def now_local():
-              return datetime.now(tz())
-
-
-          WEEKDAYS = {
-              "monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "wednesday": 2, "wed": 2,
-              "thursday": 3, "thu": 3, "friday": 4, "fri": 4, "saturday": 5, "sat": 5,
-              "sunday": 6, "sun": 6,
-          }
-
-
-          def _apply_time(base, hour, minute):
-              return base.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-
-          def _find_clock(text):
-              """Pulls a time of day out of free text. Returns (hour, minute) or None."""
-              m = re.search(r"(\d{1,2})[:.](\d{2})\s*(am|pm)?", text)
-              if m:
-                  hour = int(m.group(1))
-                  minute = int(m.group(2))
-                  suffix = m.group(3)
-              else:
-                  m = re.search(r"(\d{1,2})\s*(am|pm)", text)
-                  if not m:
-                      return None
-                  hour = int(m.group(1))
-                  minute = 0
-                  suffix = m.group(2)
-              if suffix == "pm" and hour < 12:
-                  hour += 12
-              if suffix == "am" and hour == 12:
-                  hour = 0
-              if hour > 23 or minute > 59:
-                  return None
-              return hour, minute
-
-
-          def parse_when(value):
-              """
-              Turns whatever the user said into an epoch-millisecond timestamp.
-
-              Understands: epoch millis, ISO timestamps, "tomorrow 10am",
-              "today at 21:30", "in 45 minutes", "in 2 hours", "monday 9am",
-              "2026-08-08 10:00" and a bare "10am" (meaning the next 10am).
-              """
-              if value is None:
-                  return None
-              if isinstance(value, (int, float)):
-                  return int(value if value > 1e12 else value * 1000)
-
-              text = str(value).strip().lower()
-              if not text:
-                  return None
-              if text.isdigit():
-                  n = int(text)
-                  return n if n > 1e12 else n * 1000
-
-              base = now_local()
-
-              # "in 20 minutes" / "in 3 hours" / "in 2 days"
-              m = re.search(r"in\s+(\d+)\s*(min|minute|minutes|hour|hours|hr|day|days)", text)
-              if m:
-                  amount = int(m.group(1))
-                  unit = m.group(2)
-                  if unit.startswith("min"):
-                      target = base + timedelta(minutes=amount)
-                  elif unit.startswith(("hour", "hr")):
-                      target = base + timedelta(hours=amount)
-                  else:
-                      target = base + timedelta(days=amount)
-                  return int(target.timestamp() * 1000)
-
-              # ISO first - most precise when the agent formats it properly.
-              iso = text.replace("z", "").strip()
-              for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dt%H:%M:%S", "%Y-%m-%d %H:%M",
-                          "%Y-%m-%dt%H:%M", "%Y-%m-%d", "%d-%m-%Y %H:%M", "%d/%m/%Y %H:%M"):
-                  try:
-                      parsed = datetime.strptime(iso, fmt)
-                      if tz() is not None:
-                          parsed = parsed.replace(tzinfo=tz())
-                      if fmt == "%Y-%m-%d":
-                          clock = _find_clock(text) or (9, 0)
-                          parsed = _apply_time(parsed, clock[0], clock[1])
-                      return int(parsed.timestamp() * 1000)
-                  except ValueError:
-                      continue
-
-              clock = _find_clock(text)
-              hour, minute = clock if clock else (9, 0)
-
-              if "day after tomorrow" in text:
-                  target = _apply_time(base + timedelta(days=2), hour, minute)
-              elif "tomorrow" in text or "kal" in text or "agamikal" in text:
-                  target = _apply_time(base + timedelta(days=1), hour, minute)
-              elif "tonight" in text:
-                  target = _apply_time(base, hour if clock else 21, minute)
-              elif "today" in text or "aaj" in text:
-                  target = _apply_time(base, hour, minute)
-              else:
-                  weekday = None
-                  for name, index in WEEKDAYS.items():
-                      if re.search(r"\b%s\b" % name, text):
-                          weekday = index
-                          break
-                  if weekday is not None:
-                      ahead = (weekday - base.weekday()) % 7
-                      if ahead == 0:
-                          ahead = 7
-                      target = _apply_time(base + timedelta(days=ahead), hour, minute)
-                  elif clock:
-                      target = _apply_time(base, hour, minute)
-                      if target <= base:
-                          target += timedelta(days=1)
-                  else:
-                      return None
-
-              if target <= base and "today" not in text and "tonight" not in text:
-                  # A time that already passed today means the next day.
-                  if "tomorrow" not in text and "kal" not in text:
-                      target += timedelta(days=1)
-              return int(target.timestamp() * 1000)
-
-
-          def pretty_time(epoch_ms):
-              try:
-                  return datetime.fromtimestamp(epoch_ms / 1000.0, tz()).strftime(
-                      "%a %d %b %Y, %I:%M %p"
-                  )
-              except Exception:
-                  return str(epoch_ms)
-
-
-          # Filled in the first time we have to look the account up, so the lookup
-          # happens once per run rather than on every call.
-          _DISCOVERED_USER = [""]
-
-
-          def _as_number(value):
-              try:
-                  return float(value)
-              except (TypeError, ValueError):
-                  return 0.0
-
-
-          def resolve_user(user_id=""):
-              """
-              Work out which account to ring.
-
-              Order: whatever was passed in, then HERMES_USER_ID, then the most recently
-              seen real person in the database. Without this last step the agent could
-              never phone anybody on its own, because nothing in the workflow ever set
-              a user id for it to use.
-              """
-              uid = (user_id or "").strip()
-              if uid:
-                  return uid
-              if DEFAULT_USER_ID:
-                  return DEFAULT_USER_ID
-              if _DISCOVERED_USER[0]:
-                  return _DISCOVERED_USER[0]
-
-              users = db_get("users")
-              if not isinstance(users, dict):
-                  log("no user id given and the user list could not be read")
-                  return ""
-              people = []
-              for key, row in users.items():
-                  if not isinstance(row, dict):
-                      continue
-                  found = (row.get("id") or key or "").strip()
-                  if not found or found.startswith("bot_"):
-                      continue
-                  people.append((_as_number(row.get("lastSeen")), found,
-                                 row.get("name") or "unnamed"))
-              if not people:
-                  log("no user id given and no accounts were found")
-                  return ""
-              people.sort(key=lambda p: p[0], reverse=True)
-              _DISCOVERED_USER[0] = people[0][1]
-              log("no user id given, calling %s (%s)" % (people[0][1], people[0][2]))
-              return people[0][1]
-
-
-          def schedule_call(user_id, when, say="", topic="", repeat="once", bot_id=None):
-              """Stores a future call so it survives runner restarts."""
-              user_id = resolve_user(user_id)
-              at = parse_when(when)
-              if not user_id or at is None:
-                  return None
-              entry = {
-                  "id": "sch_%s" % uuid.uuid4().hex[:8],
-                  "userId": user_id,
-                  "at": at,
-                  "say": say or "",
-                  "topic": topic or "",
-                  "repeat": (repeat or "once").lower(),
-                  "botId": bot_id or os.environ.get("HERMES_BOT_ID", "hermes"),
-                  "status": "pending",
-                  "attempts": 0,
-                  "createdAt": int(time.time() * 1000),
-                  "humanTime": pretty_time(at),
-              }
-              if db_put("hermesSchedule/%s" % entry["id"], entry):
-                  log("scheduled call", entry["id"], "for", entry["humanTime"])
-                  return entry
-              return None
-
-
-          def list_schedule():
-              items = db_get("hermesSchedule") or {}
-              out = [v for v in items.values() if isinstance(v, dict)]
-              return sorted(out, key=lambda x: x.get("at", 0))
-
-
-          def cancel_schedule(entry_id):
-              if not entry_id:
-                  return False
-              if entry_id in ("all", "*"):
-                  for item in list_schedule():
-                      db_delete("hermesSchedule/%s" % item.get("id"))
-                  return True
-              return db_delete("hermesSchedule/%s" % entry_id)
-
-
-          def due_schedules():
-              """Returns the entries that should be called right now."""
-              now_ms = int(time.time() * 1000)
-              ready = []
-              for item in list_schedule():
-                  if item.get("status") != "pending":
-                      continue
-                  at = item.get("at", 0)
-                  if at > now_ms:
-                      continue
-                  late_min = (now_ms - at) / 60000.0
-                  if late_min > LATE_GRACE_MIN:
-                      # The runner was down for too long; do not surprise the user with
-                      # a call hours after the fact - just mark it and move on.
-                      item["status"] = "missed"
-                      db_put("hermesSchedule/%s" % item["id"], item)
-                      log("schedule missed by", int(late_min), "minutes:", item["id"])
-                      continue
-                  ready.append(item)
-              return ready
-
-
-          def complete_schedule(item, outcome):
-              """Marks a schedule done, or rolls it forward when it repeats."""
-              repeat = (item.get("repeat") or "once").lower()
-              if repeat in ("daily", "weekly", "weekday") and outcome != "cancelled":
-                  step = timedelta(days=1) if repeat != "weekly" else timedelta(days=7)
-                  nxt = datetime.fromtimestamp(item["at"] / 1000.0, tz()) + step
-                  if repeat == "weekday":
-                      while nxt.weekday() >= 5:
-                          nxt += timedelta(days=1)
-                  item["at"] = int(nxt.timestamp() * 1000)
-                  item["humanTime"] = pretty_time(item["at"])
-                  item["status"] = "pending"
-                  item["attempts"] = 0
-                  db_put("hermesSchedule/%s" % item["id"], item)
-                  log("repeating call moved to", item["humanTime"])
-                  return
-              item["status"] = outcome
-              item["completedAt"] = int(time.time() * 1000)
-              db_put("hermesSchedule/%s" % item["id"], item)
-
-
-          # --------------------------------------------------------------------------
-          # who the call comes from
-          # --------------------------------------------------------------------------
-
-
-          def _bots(user_id):
-              got = db_get("bots/%s" % user_id)
-              return got if isinstance(got, dict) else {}
-
-
-          def pick_bot(user_id):
-              """
-              Returns (botId, botName, botAvatar) for the ring.
-
-              Several people share the app and each of them runs their own Hermes, so
-              the call must come from a bot that belongs to this owner. A pinned
-              HERMES_BOT_ID always wins; otherwise the owner's first bot is used.
-              """
-              rows = _bots(user_id)
-              if BOT_ID_PINNED:
-                  row = rows.get(BOT_ID) if isinstance(rows.get(BOT_ID), dict) else {}
-                  return (BOT_ID,
-                          (row.get("botName") or AGENT_NAME),
-                          (row.get("botAvatar") or ""))
-              for key, row in rows.items():
-                  if not isinstance(row, dict):
-                      continue
-                  return ((row.get("id") or key),
-                          (row.get("botName") or AGENT_NAME),
-                          (row.get("botAvatar") or ""))
-              return (BOT_ID, AGENT_NAME, "")
-
-
-          # --------------------------------------------------------------------------
-          # speech: one mp3, generated before the phone ever rings
-          # --------------------------------------------------------------------------
-
-
-          def pick_voice(text):
-              return VOICE_BN if BANGLA_RE.search(text or "") else VOICE_EN
-
-
-          def synthesize(text, voice=""):
-              """
-              Renders the line with edge-tts and returns a data URI the app can play
-              directly. Returns "" on failure - the call still rings, and the phone
-              falls back to reading ttsText with its own speech engine.
-              """
-              text = (text or "").strip()
-              if not text:
-                  return ""
-              if shutil.which("edge-tts") is None:
-                  log("edge-tts is not installed - sending the call with text only")
-                  return ""
-              voice = voice or pick_voice(text)
-              path = os.path.join(tempfile.gettempdir(),
-                                  "hermes_say_%s.mp3" % uuid.uuid4().hex[:8])
-              try:
-                  proc = subprocess.run(
-                      ["edge-tts", "--voice", voice, "--text", text,
-                       "--write-media", path],
-                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                      timeout=TTS_TIMEOUT_S)
-                  if proc.returncode != 0 or not os.path.exists(path) \
-                          or os.path.getsize(path) == 0:
-                      log("edge-tts produced nothing for voice", voice)
-                      return ""
-                  with open(path, "rb") as handle:
-                      blob = base64.b64encode(handle.read()).decode("ascii")
-                  log("voice ready: %s, %d kB" % (voice, len(blob) // 1400))
-                  return "data:audio/mpeg;base64," + blob
-              except Exception as exc:
-                  log("speech generation failed", exc)
-                  return ""
-              finally:
-                  try:
-                      os.remove(path)
-                  except OSError:
-                      pass
-
-
-          # --------------------------------------------------------------------------
-          # placing the call
-          # --------------------------------------------------------------------------
-
-
-          def send_call(user_id="", say="", topic="", voice=""):
-              """
-              Writes the ring node in the exact shape of the app's CallSession model.
-              callType BOT_TTS with the audio attached is the webhook call the app has
-              always played, so there is nothing live to negotiate and nothing to hang.
-              """
-              user_id = resolve_user(user_id)
-              if not user_id:
-                  log("cannot place the call - no user id and none could be discovered")
-                  return False
-
-              text = (say or "").strip()
-              if not text:
-                  text = ("%s here. %s" % (AGENT_NAME, topic.strip())).strip() \
-                      if topic.strip() else "%s here, calling you as asked." % AGENT_NAME
-              if len(text) > MAX_SAY_CHARS:
-                  text = text[:MAX_SAY_CHARS].rsplit(" ", 1)[0]
-
-              bot_id, bot_name, bot_avatar = pick_bot(user_id)
-              session = {
-                  "callId": "call_%s" % uuid.uuid4().hex[:8],
-                  "callerId": bot_id,
-                  "callerName": bot_name,
-                  "callerAvatar": bot_avatar,
-                  "recipientId": user_id,
-                  "callType": "BOT_TTS",
-                  "status": "RINGING",
-                  "ttsText": text,
-                  "ttsAudioUrl": "",
-                  "ttsAudioBase64": synthesize(text, voice),
-                  "timestamp": int(time.time() * 1000),
-                  "durationSeconds": 0,
-                  "roomId": "",
-                  "groupId": "",
-                  "groupName": "",
-              }
-              db_delete("calls/%s" % user_id)
-              if not db_put("calls/%s" % user_id, session):
-                  log("the ring could not be written to the database")
-                  return False
-              log("ringing %s as %s: %s" % (user_id, bot_name, text))
-              return True
-
-
-          # --------------------------------------------------------------------------
-          # the background loop: booked calls and the webhook queue
-          # --------------------------------------------------------------------------
-
-
-          def drain_outgoing():
-              """
-              Anything - a webhook, a cron job, another machine - can ask for a call by
-              pushing to hermesOutgoing/. Each entry is placed once and removed.
-              """
-              queued = db_get("hermesOutgoing") or {}
-              if not isinstance(queued, dict):
-                  return
-              for key, item in queued.items():
-                  if not isinstance(item, dict):
-                      db_delete("hermesOutgoing/%s" % key)
-                      continue
-                  db_delete("hermesOutgoing/%s" % key)
-                  send_call(item.get("userId") or item.get("user") or "",
-                            item.get("say") or item.get("text") or "",
-                            item.get("topic") or "",
-                            item.get("voice") or "")
-
-
-          def run_due():
-              for item in due_schedules():
-                  ok = send_call(item.get("userId", ""), item.get("say", ""),
-                                 item.get("topic", ""))
-                  complete_schedule(item, "called" if ok else "failed")
-
-
-          def serve():
-              log("pre-generated audio call sender ready")
-              log("voices: %s for english, %s for bangla" % (VOICE_EN, VOICE_BN))
-              if DEFAULT_USER_ID:
-                  log("calls go to", DEFAULT_USER_ID)
-              else:
-                  log("HERMES_USER_ID is not set - the newest account will be used")
-              while True:
-                  try:
-                      run_due()
-                      drain_outgoing()
-                  except Exception as exc:  # keep the loop alive for the whole run
-                      log("loop error", exc)
-                  time.sleep(SCHED_TICK_S)
-
-
-          # --------------------------------------------------------------------------
-          # command line
-          # --------------------------------------------------------------------------
-
-
-          def cli(argv=None):
-              parser = argparse.ArgumentParser(
-                  description="Ring the Agent Ai app with a pre-generated spoken line")
-              sub = parser.add_subparsers(dest="cmd")
-
-              p_now = sub.add_parser("now", help="ring the user straight away")
-              p_now.add_argument("words", nargs="*", help="what to say")
-              p_now.add_argument("--user", default="")
-              p_now.add_argument("--say", default="")
-              p_now.add_argument("--topic", default="")
-              p_now.add_argument("--voice", default="")
-
-              p_at = sub.add_parser("at", help="book a call for later")
-              p_at.add_argument("when", help='"tomorrow 10am", "in 2 hours", "monday 9am"')
-              p_at.add_argument("--user", default="")
-              p_at.add_argument("--say", default="")
-              p_at.add_argument("--topic", default="")
-              p_at.add_argument("--repeat", default="once",
-                                choices=["once", "daily", "weekday", "weekly"])
-
-              sub.add_parser("list", help="show everything booked")
-              p_cancel = sub.add_parser("cancel", help="cancel a booking")
-              p_cancel.add_argument("id")
-              sub.add_parser("whoami", help="show which account gets called")
-              sub.add_parser("serve", help="run the background loop")
-
-              args = parser.parse_args(argv)
-
-              if args.cmd in (None, "serve"):
-                  serve()
-                  return 0
-
-              if args.cmd == "now":
-                  words = " ".join(args.words).strip()
-                  user = args.user
-                  # "hermes-call USER_ID hello there" is allowed too, so a first word
-                  # that is plainly an id is treated as one.
-                  if not user and words and re.match(r"^[A-Za-z0-9_.:-]+$", words.split(" ")[0]) \
-                          and len(words.split(" ")) > 1 and "_" in words.split(" ")[0]:
-                      user, words = words.split(" ", 1)[0], words.split(" ", 1)[1]
-                  ok = send_call(user, args.say or words, args.topic, args.voice)
-                  return 0 if ok else 1
-
-              if args.cmd == "at":
-                  entry = schedule_call(args.user, args.when, args.say, args.topic,
-                                       args.repeat)
-                  if not entry:
-                      print("could not understand that time")
-                      return 1
-                  print("booked %s for %s" % (entry["id"], entry["humanTime"]))
-                  return 0
-
-              if args.cmd == "list":
-                  items = list_schedule()
-                  if not items:
-                      print("nothing booked")
-                      return 0
-                  for item in items:
-                      print("%s  %-22s %-9s %s" % (item.get("id"), item.get("humanTime"),
-                                                   item.get("status"),
-                                                   item.get("topic") or item.get("say") or ""))
-                  return 0
-
-              if args.cmd == "cancel":
-                  print("cancelled" if cancel_schedule(args.id) else "nothing to cancel")
-                  return 0
-
-              if args.cmd == "whoami":
-                  user = resolve_user("")
-                  bot_id, bot_name, _ = pick_bot(user) if user else (BOT_ID, AGENT_NAME, "")
-                  print("user: %s" % (user or "unknown"))
-                  print("bot:  %s (%s)" % (bot_id, bot_name))
-                  return 0
-
-              parser.print_help()
-              return 1
-
-
-          if __name__ == "__main__":
-              sys.exit(cli())
-          HERMESTTSCALLEOF
-
-          # One-liner Hermes can run itself:  hermes-call "message"
-          cat > /usr/local/bin/hermes-call <<'CALLCMD'
-          #!/usr/bin/env bash
-          exec python3 "${HERMES_HOME:-$HOME/.hermes}/hermes_tts_call.py" now "$@"
-          CALLCMD
-          sudo chmod +x /usr/local/bin/hermes-call 2>/dev/null || chmod +x /usr/local/bin/hermes-call 2>/dev/null || true
-
-          # Booking a call for later:  hermes-schedule "tomorrow 10am" --topic "..."
-          cat > /usr/local/bin/hermes-schedule <<'SCHEDCMD'
-          #!/usr/bin/env bash
-          BRIDGE="${HERMES_HOME:-$HOME/.hermes}/hermes_tts_call.py"
-          case "$1" in
-            --list|-l|list)     exec python3 "$BRIDGE" list ;;
-            --cancel|-c|cancel) shift; exec python3 "$BRIDGE" cancel "$@" ;;
-          esac
-          exec python3 "$BRIDGE" at "$@"
-          SCHEDCMD
-          sudo chmod +x /usr/local/bin/hermes-schedule 2>/dev/null || chmod +x /usr/local/bin/hermes-schedule 2>/dev/null || true
-
-          cat >> "$HOME/AGENTS.md" <<'AGENTSCALL'
-
-          ## Phoning the user
-
-          You can ring the user's phone and speak to them, but not hold a live
-          conversation. You write the sentence, it is turned into speech, and
-          the phone plays it when the call is accepted. Keep it to one or two
-          short sentences, the way a person leaves a spoken message.
-
-          - Ring right now: `hermes-call "opening sentence"`
-          - Book a call for later: `hermes-schedule "tomorrow 10am" --topic "what it is about"`
-          - Book what you will say too: `hermes-schedule "tomorrow 10am" --say "Good morning, here is your report."`
-          - Repeat it: `hermes-schedule "9am" --repeat daily --say "Good morning."`
-          - See everything booked: `hermes-schedule --list`
-          - Cancel one: `hermes-schedule --cancel <SCHEDULE_ID>`
-
-          - Whenever the user says anything like "call me tomorrow", "phone me at 10", "amake kal call dio", or "let us talk later about X", book it immediately with hermes-schedule, then confirm the exact date and time back to the user.
-          - Bangla is fine: write the line in Bengali script and a Bangla voice reads it.
-          - Only pass an id when you mean somebody other than your owner: `hermes-call <USER_ID> "hello"`.
-          - There is no live two-way call any more. If the user asks to actually talk with you, say that you can ring them with a spoken message and answer properly in the chat.
-
-          You have full control of this runner machine. Passwordless sudo works, so install packages, edit any file, drive the browser and the desktop, read any log and run any shell command you need to carry out what the user asked. Never answer that you are unable to do something on this computer, and never ask for permission or confirmation - do it, then say in one or two short sentences what you did.
-          AGENTSCALL
-
-          nohup python3 "$HERMES_HOME/hermes_tts_call.py" serve > /tmp/hermes-audio-call.log 2>&1 &
-          echo $! > /tmp/hermes-audio-call.pid
-          sleep 3
-          if kill -0 "$(cat /tmp/hermes-audio-call.pid)" 2>/dev/null; then
-            echo "Hermes audio call sender running (pid $(cat /tmp/hermes-audio-call.pid))."
-            echo "Ring the user:  hermes-call \"your message\""
-            echo "Book a call:    hermes-schedule \"tomorrow 10am\" --topic \"...\""
-          else
-            echo "::warning::audio call sender exited"
-            tail -n 40 /tmp/hermes-audio-call.log
-          fi
 
 
       # ── 11. Background backup loop (every 30 min -> backup branch) ──

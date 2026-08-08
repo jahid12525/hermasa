@@ -3357,6 +3357,11 @@ jobs:
           HERMES_MIC_SENSITIVITY: ${{ vars.HERMES_MIC_SENSITIVITY || 'high' }}
           # Set to 0 to go back to loudness based voice detection.
           HERMES_NEURAL_VAD: ${{ vars.HERMES_NEURAL_VAD || '1' }}
+          # How eager the microphone is: low | normal | high | max.
+          # Raise it if words go missing, lower it in a noisy room.
+          HERMES_MIC_SENSITIVITY: ${{ vars.HERMES_MIC_SENSITIVITY || 'high' }}
+          # Set to 0 to go back to loudness based voice detection.
+          HERMES_NEURAL_VAD: ${{ vars.HERMES_NEURAL_VAD || '1' }}
         run: |
           set +e
           echo "Installing WebRTC bridge dependencies..."
@@ -3383,6 +3388,29 @@ jobs:
             echo "local English voice ready: piper amy (female)"
           else
             echo "::warning::piper voice model missing - English will use edge-tts"
+          fi
+
+          # Neural voice activity detection. Deciding "is anyone talking"
+          # from loudness alone is what made callers shout: loudness
+          # describes the room, not whether there is a voice in it. Silero
+          # answers the real question on the CPU in well under a
+          # millisecond per window, so it costs nothing next to WebRTC and
+          # the browser. Package and model are both optional - if either is
+          # missing the bridge quietly uses the old detector instead.
+          python3 -m pip install --quiet --upgrade onnxruntime numpy \
+            >>/tmp/aiortc-install.log 2>&1 || \
+            echo "::warning::onnxruntime unavailable - voice detection falls back to levels"
+          if [ ! -s "$HERMES_HOME/silero_vad.onnx" ]; then
+            for VADURL in \
+              "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx" \
+              "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"; do
+              curl -fsSL "$VADURL" -o "$HERMES_HOME/silero_vad.onnx" 2>/dev/null && break
+            done
+          fi
+          if [ -s "$HERMES_HOME/silero_vad.onnx" ]; then
+            echo "neural voice detection model ready"
+          else
+            echo "::warning::silero_vad.onnx missing - voice detection falls back to levels"
           fi
 
           # Neural voice activity detection. Deciding "is anyone talking"
@@ -4863,47 +4891,55 @@ jobs:
                   """Highest speech probability in this audio, or None when unavailable."""
                   if not self.ready:
                       return None
-                  self.buffer.extend(pcm16)
-                  need = VAD_WINDOW * 2
-                  best = None
-                  while len(self.buffer) >= need:
-                      window = bytes(self.buffer[:need])
-                      del self.buffer[:need]
-                      p = self.run(window)
-                      if p is None:
-                          return None
-                      best = p if best is None else max(best, p)
-                  if best is not None:
-                      self.prob = best
-                  return best
-
-              def run(self, window):
-                  np = self.np
-                  samples = (np.frombuffer(window, dtype=np.int16)
-                             .astype(np.float32) / 32768.0)
-                  feed = {
-                      "input": samples.reshape(1, -1),
-                      "sr": np.array(STT_RATE, dtype=np.int64),
-                  }
-                  if "state" in self.names:
-                      feed["state"] = self.state
-                  else:
-                      feed["h"] = self.h
-                      feed["c"] = self.c
                   try:
-                      out = self.session.run(None, feed)
+                      self.buffer.extend(pcm16)
+                      need = VAD_WINDOW * 2
+                      best = None
+                      while len(self.buffer) >= need:
+                          window = bytes(self.buffer[:need])
+                          del self.buffer[:need]
+                          p = self.run(window)
+                          if p is None:
+                              return None
+                          best = p if best is None else max(best, p)
+                      if best is not None:
+                          self.prob = best
+                      return best
                   except Exception as exc:
-                      # One bad inference must not silence the caller for the rest of
-                      # the call, so drop to the level based gate for good.
                       log("neural vad error - switching to level based detection", exc)
                       self.session = None
                       return None
-                  if "state" in self.names:
-                      if len(out) > 1:
-                          self.state = out[1]
-                  elif len(out) > 2:
-                      self.h, self.c = out[1], out[2]
-                  return float(np.asarray(out[0]).reshape(-1)[0])
+
+              def run(self, window):
+                  """One window through the model. Never raises."""
+                  try:
+                      np = self.np
+                      samples = (np.frombuffer(window, dtype=np.int16)
+                                 .astype(np.float32) / 32768.0)
+                      feed = {
+                          "input": samples.reshape(1, -1),
+                          "sr": np.array(STT_RATE, dtype=np.int64),
+                      }
+                      if "state" in self.names:
+                          feed["state"] = self.state
+                      else:
+                          feed["h"] = self.h
+                          feed["c"] = self.c
+                      out = self.session.run(None, feed)
+                      if "state" in self.names:
+                          if len(out) > 1:
+                              self.state = out[1]
+                      elif len(out) > 2:
+                          self.h, self.c = out[1], out[2]
+                      return float(np.asarray(out[0]).reshape(-1)[0])
+                  except Exception as exc:
+                      # Anything going wrong here - a shape mismatch, an
+                      # unexpected model variant, a missing state tensor - must
+                      # cost the caller nothing. Stand down for the rest of the
+                      # call and let the level based gate carry it.
+                      log("neural vad error - switching to level based detection", exc)
+                      self.session = None
+                      return None
 
 
           def zero_crossing_rate(pcm16):
@@ -5205,6 +5241,8 @@ jobs:
                   gate = SpeechGate()
                   vad = NeuralVad()
                   was_speaking = False
+                  log("voice detection: %s"
+                      % ("silero + levels" if vad.ready else "levels only"))
                   preroll = collections.deque(maxlen=max(1, int(PREROLL_MS / 20)))
                   speech = bytearray()
                   speech_ms = 0.0
@@ -5294,17 +5332,19 @@ jobs:
                               continue
 
                           # ----------------------------------------- normal listening
-                          if voice_p is None:
-                              # No model available: fall back to levels.
-                              voiced = gate.is_speech(
-                                  rms, zcr, SPEECH_RMS_FACTOR, SPEECH_MIN_RMS,
-                                  ZCR_MIN_SPEECH, ZCR_MAX_SPEECH,
-                              )
-                          else:
+                          # The model may only ADD sensitivity. Whichever
+                          # detector says "speech" is believed, so a model that
+                          # loads but misbehaves cannot make this bridge deafer
+                          # than it is without one.
+                          voiced = gate.is_speech(
+                              rms, zcr, SPEECH_RMS_FACTOR, SPEECH_MIN_RMS,
+                              ZCR_MIN_SPEECH, ZCR_MAX_SPEECH,
+                          )
+                          if not voiced and voice_p is not None:
                               # Once an utterance is open the bar drops, so a
                               # breath between words does not end the sentence
-                              # early. The level check only stops amplified
-                              # silence from being treated as speech.
+                              # early. The level test only keeps amplified
+                              # silence from counting as speech.
                               want = VAD_KEEP_P if speech_ms > 0.0 else VAD_START_P
                               voiced = voice_p >= want and rms >= VAD_MIN_RMS
 
@@ -5336,15 +5376,15 @@ jobs:
                           silence_ms = 0.0
                           heard_ms = len(utterance) / 2.0 / STT_RATE * 1000.0
                           if len(utterance) >= min_bytes:
-                              log("heard %d ms of speech (%s)"
-                                  % (heard_ms,
-                                     "voice %.2f" % vad.prob if vad.ready
-                                     else "room floor %d" % int(gate.floor)))
+                              log("heard %d ms of speech (voice %.2f, floor %d)"
+                                  % (heard_ms, vad.prob, int(gate.floor)))
                               self.spawn_reply(utterance)
                           else:
-                              log("too short to transcribe: %d ms, need %d - raise "
+                              log("too short to transcribe: %d ms, need %d "
+                                  "(voice %.2f, floor %d) - raise "
                                   "HERMES_MIC_SENSITIVITY if this repeats"
-                                  % (heard_ms, MIN_SPEECH_MS))
+                                  % (heard_ms, MIN_SPEECH_MS, vad.prob,
+                                     int(gate.floor)))
 
               async def handle_utterance(self, pcm16):
                   loop = asyncio.get_event_loop()

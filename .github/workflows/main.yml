@@ -3357,11 +3357,6 @@ jobs:
           HERMES_MIC_SENSITIVITY: ${{ vars.HERMES_MIC_SENSITIVITY || 'high' }}
           # Set to 0 to go back to loudness based voice detection.
           HERMES_NEURAL_VAD: ${{ vars.HERMES_NEURAL_VAD || '1' }}
-          # How eager the microphone is: low | normal | high | max.
-          # Raise it if words go missing, lower it in a noisy room.
-          HERMES_MIC_SENSITIVITY: ${{ vars.HERMES_MIC_SENSITIVITY || 'high' }}
-          # Set to 0 to go back to loudness based voice detection.
-          HERMES_NEURAL_VAD: ${{ vars.HERMES_NEURAL_VAD || '1' }}
         run: |
           set +e
           echo "Installing WebRTC bridge dependencies..."
@@ -3388,29 +3383,6 @@ jobs:
             echo "local English voice ready: piper amy (female)"
           else
             echo "::warning::piper voice model missing - English will use edge-tts"
-          fi
-
-          # Neural voice activity detection. Deciding "is anyone talking"
-          # from loudness alone is what made callers shout: loudness
-          # describes the room, not whether there is a voice in it. Silero
-          # answers the real question on the CPU in well under a
-          # millisecond per window, so it costs nothing next to WebRTC and
-          # the browser. Package and model are both optional - if either is
-          # missing the bridge quietly uses the old detector instead.
-          python3 -m pip install --quiet --upgrade onnxruntime numpy \
-            >>/tmp/aiortc-install.log 2>&1 || \
-            echo "::warning::onnxruntime unavailable - voice detection falls back to levels"
-          if [ ! -s "$HERMES_HOME/silero_vad.onnx" ]; then
-            for VADURL in \
-              "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx" \
-              "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"; do
-              curl -fsSL "$VADURL" -o "$HERMES_HOME/silero_vad.onnx" 2>/dev/null && break
-            done
-          fi
-          if [ -s "$HERMES_HOME/silero_vad.onnx" ]; then
-            echo "neural voice detection model ready"
-          else
-            echo "::warning::silero_vad.onnx missing - voice detection falls back to levels"
           fi
 
           # Neural voice activity detection. Deciding "is anyone talking"

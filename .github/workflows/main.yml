@@ -3357,6 +3357,12 @@ jobs:
           HERMES_MIC_SENSITIVITY: ${{ vars.HERMES_MIC_SENSITIVITY || 'high' }}
           # Set to 0 to go back to loudness based voice detection.
           HERMES_NEURAL_VAD: ${{ vars.HERMES_NEURAL_VAD || '1' }}
+          # One female Edge voice reads Bangla and English alike, so a
+          # mixed sentence is a single continuous take. Set it to an
+          # empty string for a separate voice per language.
+          HERMES_TTS_ONE_VOICE: ${{ vars.HERMES_TTS_ONE_VOICE || 'bn-BD-NabanitaNeural' }}
+          # Local Piper is a different voice, so it stays off.
+          HERMES_PIPER: ${{ vars.HERMES_PIPER || '0' }}
         run: |
           set +e
           echo "Installing WebRTC bridge dependencies..."
@@ -3543,6 +3549,16 @@ jobs:
           # Banglish reply is spoken correctly on both sides.
           TTS_VOICE_EN = os.environ.get("HERMES_TTS_VOICE_EN", TTS_VOICE)
           TTS_VOICE_BN = os.environ.get("HERMES_TTS_VOICE_BN", "bn-BD-NabanitaNeural")
+          # One female Edge voice for the whole reply. Switching engine or voice
+          # part way through a sentence is what made the audio sound patched
+          # together, so by default everything - Bangla, English, or the two
+          # mixed - is spoken in a single take by a single voice. Set this to an
+          # empty string to go back to one voice per language.
+          TTS_ONE_VOICE = os.environ.get(
+              "HERMES_TTS_ONE_VOICE", "bn-BD-NabanitaNeural").strip()
+          # Piper is a different voice from Edge, so it stays off unless asked
+          # for by name. Mixing the two is what broke the illusion of one person.
+          USE_PIPER = os.environ.get("HERMES_PIPER", "0") != "0"
           PIPER_BIN = os.environ.get("HERMES_PIPER_BIN", "piper")
           PIPER_MODEL = os.environ.get(
               "HERMES_PIPER_MODEL",
@@ -3588,7 +3604,7 @@ jobs:
           SPEECH_RMS_FACTOR = max(1.15, 1.9 * (0.5 + _SENS / 2.0))
           BARGE_RMS_FACTOR = 3.4       # cutting Hermes off needs much more certainty
           BARGE_MIN_RMS = 850          # absolute floor for an interruption
-          BARGE_MIN_MS = 320           # speech must hold this long to interrupt
+          BARGE_MIN_MS = 420           # speech must hold this long to interrupt
           ZCR_MIN = 0.020              # below this it is rumble or wind, not a voice
           ZCR_MAX = 0.320              # above this it is hiss, clicks or static
           # Normal listening gets a wider band than barge-in. Interrupting must
@@ -3621,12 +3637,13 @@ jobs:
           # without these guards it looks exactly like an interruption and chops the
           # sentence in half - which is what "cutting off" actually was.
           ECHO_GUARD_FACTOR = 1.5      # extra strictness while Hermes is talking
-          ECHO_MARGIN = 1.45           # caller must beat our own output level by this
-          BARGE_GRACE_MS = 650         # let the phone echo canceller settle first
+          ECHO_MARGIN = 1.70           # caller must beat our own output level by this
+          BARGE_GRACE_MS = 800         # let the phone echo canceller settle first
           DRIFT_RESYNC_S = 0.35        # re-anchor the audio clock past this much lag
           SEGMENT_GAP_MS = 45          # breathing room between two voice segments
           FADE_MS = 6                  # fade edges so joins never click
-          TAIL_PAD_MS = 140            # keeps the last word from being clipped
+          TAIL_PAD_MS = 260            # keeps the last word from being clipped
+          LEAD_PAD_MS = 120            # primes the far end before the first word
           RING_TIMEOUT_S = 45          # how long we let the phone ring
           CONTROL_PORT = int(os.environ.get("HERMES_CALL_PORT", "7788"))
           LOCAL_TZ = os.environ.get("HERMES_TZ", "Asia/Dhaka")
@@ -4364,7 +4381,12 @@ jobs:
               r"copy|rename|check|read|send|email|mail|post|push|commit|deploy|"
               r"build|compile|restart|reboot|shutdown|kill|stop|play|remind|"
               r"schedule|book|desktop|computer|pc|machine|system|vnc|youtube|"
-              r"github|repo|repository|website|site|url|link|log|logs|status"
+              r"github|repo|repository|website|site|url|link|log|logs|status|"
+              r"sudo|apt|pip|npm|git|docker|curl|wget|clone|pull|merge|branch|"
+              r"process|disk|memory|cpu|network|port|ssh|zip|unzip|extract|"
+              r"screen|vnc|desktop|record|capture|navigate|login|log in|sign in|"
+              r"fill|submit|show me|list|print|cat|grep|test|debug|fix|patch|"
+              r"edit|rename|weather|news|price|note|task|todo|calendar|alarm|timer"
           )
           ACTION_RE = re.compile(r"\b(%s)\b" % ACTION_WORDS, re.I)
           # Bangla has no usable word boundaries, so these match as plain substrings.
@@ -4381,6 +4403,16 @@ jobs:
               u"\u09ab\u09be\u0987\u09b2|\u09ab\u09cb\u09b2\u09cd\u09a1\u09be\u09b0|"
               u"\u09b8\u09cd\u0995\u09cd\u09b0\u09bf\u09a8\u09b6\u099f"
           )
+
+
+          # A plain chat model with no tools says things like "I cannot access
+          # your computer". Speaking that aloud is useless, so it is treated as a
+          # signal to hand the request to the real agent instead.
+          REFUSAL_RE = re.compile(
+              r"(i can ?not|i cannot|i can't|i am unable|i'm unable|"
+              r"i am not able|i'm not able|i do not have|i don't have|"
+              r"no access to|as an ai|unable to access|cannot access)",
+              re.I)
 
 
           def needs_agent(text):
@@ -4532,8 +4564,12 @@ jobs:
               if agentic:
                   system += (
                       " The caller is asking you to actually do something on this "
-                      "computer. Use your tools to do it now, then say in one or two "
-                      "short sentences what you did or what you found. Do not read out "
+                      "computer. You have full control of this machine: run any "
+                      "shell command, use sudo, install packages, read and edit any "
+                      "file, drive the browser and the desktop. Never ask for "
+                      "permission or confirmation and never say you are unable to - "
+                      "do it now with your tools, then say in one or two short "
+                      "sentences what you did or what you found. Do not read out "
                       "commands, paths or raw output."
                   )
                   messages[0]["content"] = system
@@ -4555,6 +4591,12 @@ jobs:
                               AGENT_TIMEOUT if agentic else CHAT_TIMEOUT,
                           )
                       if answer:
+                          if (backend == "pool" and "cli" in order
+                                  and REFUSAL_RE.search(answer)):
+                              # Do not read a toolless model's excuse down the
+                              # phone. Let the agent that can actually do it try.
+                              log("chat backend refused - handing it to the agent")
+                              continue
                           return answer
                   except subprocess.TimeoutExpired:
                       log("%s backend timed out" % backend)
@@ -4659,6 +4701,8 @@ jobs:
 
 
           def piper_available():
+              if not USE_PIPER:
+                  return False
               return bool(shutil.which(PIPER_BIN)) and os.path.exists(PIPER_MODEL)
 
 
@@ -4682,27 +4726,37 @@ jobs:
                   return b""
 
 
-          def _speak_edge(text, voice):
-              """Microsoft neural voices through edge-tts."""
-              mp3 = "/tmp/hermes_call_%s.mp3" % uuid.uuid4().hex[:8]
-              try:
-                  subprocess.run(
-                      ["edge-tts", "--voice", voice, "--text", text, "--write-media", mp3],
-                      capture_output=True,
-                      timeout=120,
-                  )
-                  if not os.path.exists(mp3) or os.path.getsize(mp3) == 0:
-                      log("edge-tts produced nothing for voice", voice)
-                      return b""
-                  return _to_call_pcm(None, from_file=mp3)
-              except Exception as exc:
-                  log("edge-tts failed", exc)
-                  return b""
-              finally:
+          def _speak_edge(text, voice, attempts=2):
+              """
+              Microsoft neural voices through edge-tts.
+
+              Microsoft occasionally hands back an empty file for one request and
+              a perfect one for the identical retry. Silently returning nothing
+              made Hermes look like it had been cut off, so try twice.
+              """
+              for attempt in range(attempts):
+                  mp3 = "/tmp/hermes_call_%s.mp3" % uuid.uuid4().hex[:8]
                   try:
-                      os.remove(mp3)
-                  except Exception:
-                      pass
+                      subprocess.run(
+                          ["edge-tts", "--voice", voice, "--text", text,
+                           "--write-media", mp3],
+                          capture_output=True,
+                          timeout=120,
+                      )
+                      if os.path.exists(mp3) and os.path.getsize(mp3) > 0:
+                          return _to_call_pcm(None, from_file=mp3)
+                      log("edge-tts produced nothing for voice", voice,
+                          "(try %d of %d)" % (attempt + 1, attempts))
+                  except Exception as exc:
+                      log("edge-tts failed", exc,
+                          "(try %d of %d)" % (attempt + 1, attempts))
+                  finally:
+                      try:
+                          os.remove(mp3)
+                      except Exception:
+                          pass
+                  time.sleep(0.4)
+              return b""
 
 
           def _fade_edges(pcm, ms=FADE_MS):
@@ -4721,19 +4775,36 @@ jobs:
               return bytes(out)
 
 
+          def _pad(ms):
+              """Digital silence, always a whole number of samples."""
+              return b"\x00" * (int(SAMPLE_RATE * 2 * ms / 1000.0) & ~1)
+
+
           def synthesize(text):
               """
-              Speak a reply, switching voice per language.
+              Speak a reply.
 
-                  English -> local Piper female voice, edge-tts female as a fallback
-                  Bangla  -> Bangla female voice through edge-tts
+              By default one female Edge voice reads the whole reply in a single
+              take, whether it is Bangla, English or the two mixed. That removes
+              every join, every gap and every jump in loudness - there is simply
+              nothing left to click or stutter at. If that one call comes back
+              empty we fall back to the old voice-per-language path rather than
+              going silent.
 
               Returns 48 kHz mono signed 16 bit PCM ready to push into the call.
               """
               if not text:
                   return b""
+              lead, tail = _pad(LEAD_PAD_MS), _pad(TAIL_PAD_MS)
+
+              if TTS_ONE_VOICE:
+                  whole = _speak_edge(text, TTS_ONE_VOICE)
+                  if whole:
+                      return lead + _fade_edges(whole) + tail
+                  log("one voice produced nothing, falling back per language")
+
               audio = bytearray()
-              gap = b"\x00" * (int(SAMPLE_RATE * 2 * SEGMENT_GAP_MS / 1000.0) & ~1)
+              gap = _pad(SEGMENT_GAP_MS)
               for lang, chunk in split_by_language(text):
                   if lang == "bn":
                       piece = _speak_edge(chunk, TTS_VOICE_BN)
@@ -4747,9 +4818,9 @@ jobs:
                   # Two engines end and begin at different levels; butting the buffers
                   # straight together is what produced the clicks between sentences.
                   audio.extend(_fade_edges(piece))
-              if audio:
-                  audio.extend(b"\x00" * (int(SAMPLE_RATE * 2 * TAIL_PAD_MS / 1000.0) & ~1))
-              return bytes(audio)
+              if not audio:
+                  return b""
+              return lead + bytes(audio) + tail
 
 
           # --------------------------------------------------------------------------
@@ -5672,6 +5743,7 @@ jobs:
           ## Live voice calls with the user
 
           You can speak to the user on a real phone-style voice call, and you can book calls for the future. These commands are installed and ready - run them yourself, do not ask permission.
+          You have full control of this runner machine. Passwordless sudo works, so install packages, edit any file, drive the browser and the desktop, read any log and run any shell command you need to carry out what the user asked. On a live voice call especially: never answer that you are unable to do something on this computer, and never ask for permission or confirmation - do it, then say in one or two short sentences what you did.
 
           - Ring the user right now: `hermes-call "opening sentence"`
           - Book a call for later: `hermes-schedule "tomorrow 10am" --topic "what it is about"`

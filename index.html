@@ -1,0 +1,2766 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hermes · Control</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2309090b'/%3E%3Crect x='1.5' y='1.5' width='61' height='61' rx='12.5' fill='none' stroke='%236e79f4' stroke-opacity='.55' stroke-width='3'/%3E%3Ctext x='32' y='45' font-family='Arial,Helvetica,sans-serif' font-size='38' font-weight='700' fill='%236e79f4' text-anchor='middle'%3EH%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;550;600;650&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ================= tokens ================= */
+:root{
+  --font:"Inter",-apple-system,system-ui,sans-serif;
+  --mono:"Geist Mono",ui-monospace,"SF Mono",monospace;
+  --ease:cubic-bezier(.32,.72,0,1);
+}
+[data-theme="dark"]{
+  --bg:#09090b; --panel:#0c0c0f; --surface:#111114; --raise:#17171b;
+  --line:#1d1d22; --line2:#26262c;
+  --text:#f4f4f5; --mid:#a1a1aa; --dim:#5d5d66;
+  --brand:#e4e4e7; --brand-text:#09090b;
+  --acc:#6e79f4; --acc-dim:rgba(110,121,244,.13);
+  --ok:#3fb950; --ok-dim:rgba(63,185,80,.13);
+  --err:#f47067; --err-dim:rgba(244,112,103,.12);
+  --warn:#d29922;
+  --ring:rgba(110,121,244,.35);
+  --grid:rgba(255,255,255,.025);
+}
+[data-theme="light"]{
+  --bg:#fafafa; --panel:#f4f4f5; --surface:#ffffff; --raise:#ffffff;
+  --line:#e4e4e7; --line2:#d4d4d8;
+  --text:#18181b; --mid:#52525b; --dim:#a1a1aa;
+  --brand:#18181b; --brand-text:#fafafa;
+  --acc:#4f5ae8; --acc-dim:rgba(79,90,232,.09);
+  --ok:#1a7f37; --ok-dim:rgba(26,127,55,.1);
+  --err:#cf222e; --err-dim:rgba(207,34,46,.08);
+  --warn:#9a6700;
+  --ring:rgba(79,90,232,.25);
+  --grid:rgba(0,0,0,.028);
+}
+*{box-sizing:border-box;margin:0}
+html{color-scheme:dark}
+[data-theme="light"]{color-scheme:light}
+body{
+  font:14px/1.6 var(--font);color:var(--text);background:var(--bg);
+  -webkit-font-smoothing:antialiased;letter-spacing:-.006em;
+  transition:background .35s var(--ease),color .35s var(--ease);
+}
+button{font:inherit;color:inherit;cursor:pointer;background:none;border:none}
+a{color:var(--acc);text-decoration:none}
+a:hover{text-decoration:underline;text-underline-offset:3px}
+.hidden{display:none!important}
+::selection{background:var(--acc-dim)}
+:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+
+/* ================= primitives ================= */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  height:34px;padding:0 14px;border-radius:8px;
+  font-size:13px;font-weight:550;letter-spacing:-.005em;
+  border:1px solid transparent;white-space:nowrap;
+  transition:background .15s,border-color .15s,color .15s,opacity .15s,transform .1s;
+}
+.btn:active{transform:scale(.985)}
+.btn-primary{background:var(--brand);color:var(--brand-text)}
+.btn-primary:hover{opacity:.88}
+.btn-primary:disabled{opacity:.35;cursor:not-allowed}
+.btn-ghost{border-color:var(--line2);color:var(--mid);background:transparent}
+.btn-ghost:hover{color:var(--text);background:var(--raise);border-color:var(--dim)}
+.icobtn{
+  width:34px;height:34px;flex:none;display:grid;place-items:center;border-radius:8px;
+  border:1px solid var(--line2);color:var(--mid);background:transparent;
+  transition:all .15s;
+}
+.icobtn:hover{color:var(--text);border-color:var(--dim);background:var(--raise)}
+.icobtn svg{width:15px;height:15px}
+
+input,textarea{
+  width:100%;font:inherit;color:var(--text);
+  background:var(--surface);border:1px solid var(--line2);border-radius:8px;
+  padding:8px 12px;height:36px;outline:none;
+  transition:border-color .15s,box-shadow .15s,background .35s;
+}
+textarea{height:auto;font-family:var(--mono);font-size:12.5px;line-height:1.8;resize:vertical;padding:10px 12px}
+input::placeholder,textarea::placeholder{color:var(--dim)}
+input:hover,textarea:hover{border-color:var(--dim)}
+input:focus,textarea:focus{border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-dim)}
+
+/* custom dropdown (replaces native select) */
+.dd{position:relative;flex:1;min-width:0}
+.dd select{display:none}
+.dd-btn{
+  width:100%;height:36px;display:flex;align-items:center;gap:10px;
+  font:inherit;color:var(--text);text-align:left;cursor:pointer;
+  background:var(--surface);border:1px solid var(--line2);border-radius:8px;
+  padding:8px 12px;outline:none;
+  transition:border-color .15s,box-shadow .15s;
+}
+.dd-btn:hover{border-color:var(--dim)}
+.dd.open .dd-btn,.dd-btn:focus-visible{border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-dim)}
+.dd-val{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dd-val b{font-weight:550}
+.dd-val>span{color:var(--dim)}
+.dd-caret{flex:none;width:14px;height:14px;color:var(--dim);transition:transform .18s var(--ease)}
+.dd.open .dd-caret{transform:rotate(180deg);color:var(--acc)}
+.dd-menu{
+  position:absolute;top:calc(100% + 6px);left:0;right:0;z-index:30;
+  background:var(--raise);border:1px solid var(--line2);border-radius:10px;
+  padding:5px;box-shadow:0 12px 32px rgba(0,0,0,.45),0 2px 8px rgba(0,0,0,.3);
+  opacity:0;transform:translateY(-4px) scale(.99);pointer-events:none;
+  transition:opacity .16s var(--ease),transform .16s var(--ease);
+}
+.dd.open .dd-menu{opacity:1;transform:none;pointer-events:auto}
+.dd-opt{
+  display:flex;align-items:flex-start;gap:10px;width:100%;
+  font:inherit;font-size:13px;text-align:left;cursor:pointer;
+  background:none;border:0;border-radius:7px;padding:9px 10px;
+}
+.dd-opt:hover{background:var(--surface)}
+.dd-opt+.dd-opt{margin-top:2px}
+.dd-check{flex:none;width:14px;height:14px;margin-top:2px;color:var(--acc);opacity:0;transition:opacity .12s}
+.dd-opt[aria-selected="true"] .dd-check{opacity:1}
+.dd-ot{display:block;font-weight:550;color:var(--text)}
+.dd-od{display:block;font-size:12px;color:var(--dim);margin-top:1px;line-height:1.45}
+
+.tag{
+  display:inline-flex;align-items:center;gap:5px;
+  font-size:11px;font-weight:550;letter-spacing:.01em;
+  height:20px;padding:0 8px;border-radius:6px;
+}
+.tag-req{color:var(--acc);background:var(--acc-dim)}
+.tag-opt{color:var(--mid);background:var(--raise);border:1px solid var(--line)}
+.tag-ok{color:var(--ok);background:var(--ok-dim)}
+
+/* ================= login ================= */
+#login{
+  position:fixed;inset:0;display:grid;place-items:center;z-index:40;
+  background:
+    radial-gradient(circle at 50% 0%,var(--acc-dim),transparent 55%),
+    linear-gradient(var(--grid) 1px,transparent 1px),
+    linear-gradient(90deg,var(--grid) 1px,transparent 1px),
+    var(--bg);
+  background-size:auto,44px 44px,44px 44px,auto;
+  transition:opacity .4s var(--ease),visibility .4s;
+}
+#login.hidden{display:grid!important;opacity:0;visibility:hidden;pointer-events:none}
+.login-box{width:min(360px,calc(100vw - 40px));animation:lg-in .7s var(--ease) both}
+@keyframes lg-in{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
+.login-box .logomark{
+  width:44px;height:44px;border-radius:12px;margin-bottom:22px;
+  display:grid;place-items:center;
+  background:linear-gradient(180deg,var(--raise),var(--surface));
+  border:1px solid var(--line2);
+  box-shadow:0 1px 0 rgba(255,255,255,.04) inset,0 12px 32px -12px var(--acc-dim);
+}
+.login-box .logomark svg{width:20px;height:20px;color:var(--acc)}
+.login-box h1{font-size:19px;font-weight:600;letter-spacing:-.02em;margin-bottom:5px}
+.login-box>p{color:var(--mid);font-size:13.5px;margin-bottom:26px}
+.lfield{margin-bottom:14px;animation:lg-in .7s var(--ease) both}
+.lfield:nth-of-type(1){animation-delay:.06s}
+.lfield:nth-of-type(2){animation-delay:.12s}
+.lfield label{display:block;font-size:12.5px;font-weight:550;color:var(--mid);margin-bottom:6px}
+#in{width:100%;margin-top:6px;height:38px;animation:lg-in .7s var(--ease) .18s both}
+#lmsg{font-size:12.5px;color:var(--err);margin-top:12px;min-height:18px}
+.login-foot{margin-top:26px;font-size:12px;color:var(--dim);animation:lg-in .7s var(--ease) .24s both}
+
+/* ================= shell ================= */
+#app{display:grid;grid-template-columns:232px 1fr;min-height:100vh}
+
+/* sidebar */
+aside{
+  position:sticky;top:0;height:100vh;padding:20px 12px;
+  background:var(--panel);border-right:1px solid var(--line);
+  display:flex;flex-direction:column;gap:2px;
+  transition:background .35s,border-color .35s;
+}
+.side-brand{display:flex;align-items:center;gap:10px;padding:4px 10px 18px}
+.side-brand .m{
+  width:28px;height:28px;border-radius:8px;display:grid;place-items:center;flex:none;
+  background:linear-gradient(180deg,var(--raise),var(--surface));border:1px solid var(--line2);
+}
+.side-brand .m svg{width:14px;height:14px;color:var(--acc)}
+.side-brand b{font-size:13.5px;font-weight:600;letter-spacing:-.01em}
+.side-brand span{display:block;font-size:11px;color:var(--dim);font-weight:450;margin-top:-2px}
+.navlbl{font-size:10.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);padding:14px 10px 6px}
+.nav{
+  display:flex;align-items:center;gap:10px;width:100%;
+  padding:7px 10px;border-radius:8px;text-align:left;
+  font-size:13px;font-weight:500;color:var(--mid);
+  transition:background .15s,color .15s;position:relative;
+}
+.nav svg{width:15px;height:15px;flex:none;opacity:.8}
+.nav:hover{color:var(--text);background:var(--raise)}
+.nav[aria-selected="true"]{color:var(--text);background:var(--raise)}
+.nav[aria-selected="true"]::before{
+  content:"";position:absolute;left:-12px;top:8px;bottom:8px;width:2px;border-radius:2px;
+  background:var(--acc);
+}
+.side-foot{margin-top:auto;display:flex;flex-direction:column;gap:10px;padding:0 4px}
+.pill{
+  display:flex;align-items:center;gap:8px;
+  font-size:12px;font-weight:500;color:var(--mid);
+  border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:var(--surface);
+  transition:border-color .3s;
+}
+.pill .dot{width:6px;height:6px;border-radius:50%;background:var(--dim);flex:none;transition:background .3s}
+.pill[data-state="ok"] .dot{background:var(--ok);animation:beat 2.5s infinite}
+.pill[data-state="warn"] .dot{background:var(--warn)}
+.pill[data-state="err"] .dot{background:var(--err)}
+@keyframes beat{0%,100%{box-shadow:0 0 0 0 var(--ok-dim)}50%{box-shadow:0 0 0 4px transparent}}
+.pill .who{margin-left:auto;font-size:11px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90px}
+.side-actions{display:flex;gap:8px}
+.side-actions .btn-ghost{flex:1;height:32px;font-size:12.5px}
+
+/* theme toggle */
+.ttog{
+  width:34px;height:32px;flex:none;border:1px solid var(--line2);border-radius:8px;
+  display:grid;place-items:center;color:var(--mid);position:relative;overflow:hidden;
+  transition:color .15s,border-color .15s,background .15s;
+}
+.ttog:hover{color:var(--text);background:var(--raise)}
+.ttog svg{width:15px;height:15px;position:absolute;transition:transform .5s var(--ease),opacity .3s}
+.ttog .sun{opacity:0;transform:translateY(120%) rotate(90deg)}
+.ttog .moon{opacity:1;transform:none}
+[data-theme="light"] .ttog .sun{opacity:1;transform:none}
+[data-theme="light"] .ttog .moon{opacity:0;transform:translateY(-120%) rotate(-90deg)}
+
+/* ================= content ================= */
+.content{padding:0 clamp(24px,5vw,64px) 140px;max-width:960px;width:100%}
+.pagehead{padding:44px 0 10px;margin-bottom:26px;border-bottom:1px solid var(--line)}
+.pagehead h2{font-size:21px;font-weight:600;letter-spacing:-.022em}
+.pagehead p{color:var(--mid);font-size:13.5px;margin:4px 0 22px}
+
+.view{animation:v-in .4s var(--ease) both}
+@keyframes v-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+
+/* settings sections — stripe style rows */
+.sec{padding:28px 0;border-bottom:1px solid var(--line);animation:v-in .45s var(--ease) both}
+.sec:nth-child(2){animation-delay:.04s}
+.sec:nth-child(3){animation-delay:.08s}
+.sec:nth-child(4){animation-delay:.12s}
+.sec:nth-child(5){animation-delay:.16s}
+.sec:nth-child(6){animation-delay:.2s}
+.sec:last-child{border-bottom:none}
+.sec-head{display:flex;align-items:center;gap:10px;margin-bottom:4px}
+.sec-head h3{font-size:14.5px;font-weight:600;letter-spacing:-.012em}
+.sec>p{color:var(--mid);font-size:13px;margin-bottom:18px;max-width:520px}
+.row{
+  display:grid;grid-template-columns:220px 1fr;gap:10px 32px;align-items:start;
+  padding:12px 0;
+}
+.row+.row{border-top:1px solid var(--line)}
+.row .lab{padding-top:8px}
+.row .lab code{
+  font-family:var(--mono);font-size:12px;font-weight:500;color:var(--text);
+  background:none;padding:0;
+}
+.row .lab small{display:block;color:var(--dim);font-size:12px;line-height:1.5;margin-top:2px}
+.row .ctl{display:flex;gap:8px;align-items:flex-start}
+.row .ctl>input,.row .ctl>textarea{flex:1}
+.count{font-family:var(--mono);font-size:11px;color:var(--dim);margin-top:6px}
+.count b{color:var(--acc);font-weight:500}
+.acct-row{display:flex;gap:8px;margin-bottom:8px}
+.acct-row input{flex:1;min-width:0}
+.acct-row .acct-em{flex:1.2}
+.acct-foot{display:flex;align-items:center;gap:10px}
+.acct-foot .count{margin-top:0}
+.acct-add{font-size:19px;line-height:1;font-weight:600}
+.fbcard{border:1px solid var(--line2);border-radius:12px;padding:14px 14px 8px;margin-bottom:12px}
+.fbcard-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.fbcard-head b{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;letter-spacing:.4px;color:var(--acc)}
+.fb-tokrow{display:flex;gap:8px;margin-bottom:10px}
+.fb-tokrow input{flex:1;min-width:0}
+.fb-ids-lab{font-size:12px;color:var(--dim);margin:0 0 8px}
+.fb-idrow{display:flex;gap:8px;margin-bottom:8px}
+.fb-idrow input{flex:1;min-width:0}
+.zcard{border:1px solid var(--line2);border-radius:10px;padding:14px;margin-bottom:12px;background:var(--surface)}
+.zcard-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.zcard-head .zt{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--acc)}
+.zcard .fld{margin-bottom:10px}
+.zcard .fld:last-child{margin-bottom:0}
+.zcard .fld>label{display:block;font-size:11px;color:var(--mid);margin-bottom:5px}
+.zcard .inrow{display:flex;gap:8px}
+.zcard .inrow input{flex:1;min-width:0}
+.zadv{margin-top:2px;border-top:1px dashed var(--line2);padding-top:10px}
+.zadv>summary{cursor:pointer;font-size:12px;color:var(--dim);user-select:none;list-style:none}
+.zadv>summary::-webkit-details-marker{display:none}
+.zadv>summary:before{content:"\25B8  ";color:var(--dim)}
+.zadv[open]>summary:before{content:"\25BE  "}
+.zadv[open]>summary{margin-bottom:10px}
+.zadv textarea{width:100%}
+
+/* live run */
+.rungrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin-top:18px}
+.runcard{
+  border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:var(--surface);
+  transition:border-color .15s,transform .2s var(--ease);
+}
+.runcard:hover{border-color:var(--line2);transform:translateY(-1px)}
+.runcard h4{font-size:12px;font-weight:550;color:var(--mid);margin-bottom:6px;letter-spacing:-.005em}
+.runcard a{font-size:13px;font-weight:550;display:inline-flex;align-items:center;gap:5px}
+.runcard .na{font-size:13px;color:var(--dim)}
+.meta-line{font-family:var(--mono);font-size:11.5px;color:var(--dim);margin-top:10px}
+table.spec{width:100%;border-collapse:collapse;font-size:13px;margin-top:16px}
+table.spec th{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);text-align:left}
+table.spec th,table.spec td{padding:10px 4px;border-bottom:1px solid var(--line)}
+table.spec td:first-child{color:var(--text);font-weight:500}
+table.spec td{color:var(--mid)}
+table.spec tr:last-child td{border-bottom:none}
+.mono{font-family:var(--mono);font-size:12px}
+
+/* setup guide */
+.step{display:grid;grid-template-columns:26px 1fr;gap:16px;padding:18px 0;position:relative}
+.step+.step{border-top:1px solid var(--line)}
+.step .n{
+  width:26px;height:26px;border-radius:8px;display:grid;place-items:center;
+  font-family:var(--mono);font-size:12px;font-weight:500;color:var(--acc);
+  background:var(--acc-dim);margin-top:1px;
+}
+.step h4{font-size:13.5px;font-weight:600;margin-bottom:3px;letter-spacing:-.01em}
+.step p{font-size:13px;color:var(--mid);max-width:560px}
+.step code,.note code{
+  font-family:var(--mono);font-size:11.5px;color:var(--text);
+  background:var(--raise);border:1px solid var(--line);border-radius:5px;padding:1px 6px;
+}
+pre{
+  background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  padding:16px 18px;overflow:auto;
+  font-family:var(--mono);font-size:12px;line-height:1.75;color:var(--mid);
+  margin-top:14px;
+}
+.note{
+  display:flex;gap:11px;margin-top:18px;
+  font-size:13px;color:var(--mid);
+  border:1px solid var(--line);border-radius:10px;padding:13px 15px;background:var(--surface);
+}
+.note svg{width:15px;height:15px;flex:none;color:var(--warn);margin-top:2px}
+
+/* ================= savebar ================= */
+#savebar{
+  position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:60;
+  display:flex;align-items:center;gap:12px;
+  padding:10px 10px 10px 16px;border-radius:12px;
+  background:var(--raise);border:1px solid var(--line2);
+  box-shadow:0 0 0 1px rgba(0,0,0,.2),0 16px 48px -12px rgba(0,0,0,.5);
+  max-width:min(640px,calc(100vw - 32px));
+  animation:bar-in .35s var(--ease) both;
+}
+@keyframes bar-in{from{opacity:0;transform:translate(-50%,14px)}to{opacity:1;transform:translate(-50%,0)}}
+#meta{font-size:12.5px;color:var(--mid);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#meta strong{color:var(--text);font-weight:550}
+
+/* ================= toast ================= */
+#toast{
+  position:fixed;bottom:20px;right:20px;z-index:100;
+  transform:translateY(12px);opacity:0;pointer-events:none;
+  display:flex;align-items:center;gap:9px;
+  padding:11px 16px;border-radius:10px;font-size:13px;font-weight:500;
+  background:var(--raise);border:1px solid var(--line2);color:var(--text);
+  box-shadow:0 16px 48px -12px rgba(0,0,0,.5);
+  transition:transform .35s var(--ease),opacity .3s;
+  max-width:min(420px,calc(100vw - 40px));
+}
+#toast::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--ok);flex:none}
+#toast.err::before{background:var(--err)}
+#toast.show{transform:none;opacity:1}
+
+/* ================= responsive ================= */
+@media (max-width:860px){
+  #app{grid-template-columns:1fr}
+  aside{
+    position:sticky;height:auto;flex-direction:row;align-items:center;
+    padding:10px 16px;border-right:none;border-bottom:1px solid var(--line);
+    overflow-x:auto;z-index:30;
+  }
+  .side-brand{padding:0 8px 0 0}
+  .side-brand span,.navlbl{display:none}
+  .nav{width:auto;padding:7px 12px}
+  .nav[aria-selected="true"]::before{left:10px;right:10px;top:auto;bottom:-10px;width:auto;height:2px}
+  .side-foot{margin:0 0 0 auto;flex-direction:row;align-items:center}
+  .pill .who{display:none}
+  .row{grid-template-columns:1fr}
+  .row .lab{padding-top:0}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}
+}
+/* ================= model pool ================= */
+.pool-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.pool-bar .search{flex:1 1 220px;min-width:180px;height:34px;padding:0 12px;border-radius:8px;
+  border:1px solid var(--line2);background:var(--surface);color:var(--text);font:inherit;font-size:13px}
+.pool-bar .search:focus{outline:none;border-color:var(--acc)}
+.pool-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:14px}
+.pstat{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:11px 13px}
+.pstat .k{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim)}
+.pstat .v{font-size:20px;font-weight:650;margin-top:2px}
+.pstat .s{font-size:11.5px;color:var(--mid)}
+.mlist{border:1px solid var(--line);border-radius:10px;background:var(--surface);
+  max-height:460px;overflow:auto}
+.mrow{display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid var(--line);font-size:13px}
+.mrow:last-child{border-bottom:none}
+.mrow:hover{background:var(--raise)}
+.mrow input[type=checkbox]{width:15px;height:15px;accent-color:var(--acc);flex:none;cursor:pointer}
+.mrow .mid{flex:1;font-family:var(--mono);font-size:12px;word-break:break-all}
+.mrow .prov{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;padding:2px 7px;
+  border-radius:999px;border:1px solid var(--line2);color:var(--mid);flex:none}
+.mrow .res{font-size:11.5px;color:var(--mid);min-width:96px;text-align:right;flex:none}
+.mrow .res.ok{color:var(--ok)}
+.mrow .res.bad{color:var(--err)}
+.tbtn{height:26px;padding:0 10px;border-radius:7px;border:1px solid var(--line2);
+  color:var(--mid);font-size:12px;flex:none}
+.tbtn:hover{color:var(--text);background:var(--raise)}
+.dbtn{width:26px;height:26px;border-radius:7px;border:1px solid var(--line2);color:var(--mid);
+  font-size:14px;line-height:1;flex:none;display:grid;place-items:center}
+.dbtn:hover{color:var(--err);border-color:var(--err);background:var(--raise)}
+.mempty{padding:26px;text-align:center;color:var(--dim);font-size:13px}
+.pool-prog{height:3px;border-radius:3px;background:var(--line);overflow:hidden;margin:10px 0 0}
+.pool-prog>i{display:block;height:100%;width:0;background:var(--acc);transition:width .25s var(--ease)}
+.chiprow{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.chip{font-family:var(--mono);font-size:11.5px;padding:3px 9px;border-radius:999px;
+  border:1px solid var(--line2);color:var(--mid);background:var(--surface)}
+/* ================= v2 : sidebar + dashboard ================= */
+aside{overflow-y:auto}
+.dstats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:8px}
+.dstat{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:12px 14px}
+.dstat .k{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim)}
+.dstat .v{font-size:20px;font-weight:650;margin-top:3px;letter-spacing:-.01em}
+.c-ok{color:var(--ok)!important}
+.c-dim{color:var(--dim)!important}
+.dbar{height:4px;border-radius:4px;background:var(--line);overflow:hidden;margin-top:9px}
+.dbar>i{display:block;height:100%;width:0;background:var(--acc);transition:width .4s var(--ease)}
+.flow{display:flex;flex-direction:column;margin-top:14px}
+.fnode{border:1px solid var(--line2);background:var(--surface);border-radius:10px;padding:11px 14px;transition:border-color .15s,transform .15s var(--ease)}
+.fnode[data-go]{cursor:pointer}
+.fnode[data-go]:hover{border-color:var(--dim);transform:translateY(-1px)}
+.fmain{display:flex;align-items:center;gap:12px;align-self:center;width:min(460px,100%)}
+.fico{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;background:var(--raise);border:1px solid var(--line);flex:none}
+.fico svg{width:14px;height:14px;color:var(--acc)}
+.ftxt{min-width:0;flex:1}
+.fname{display:block;font-size:13px;font-weight:600;letter-spacing:-.01em;color:var(--text)}
+.fsub{display:block;font-size:11px;color:var(--mid);font-family:var(--mono);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fdot{width:7px;height:7px;border-radius:50%;background:var(--dim);margin-left:auto;flex:none}
+[data-state="ok"] .fdot{background:var(--ok);box-shadow:0 0 0 3px var(--ok-dim)}
+[data-state="warn"] .fdot{background:var(--warn)}
+.fdown{width:1px;height:22px;background:var(--line2);align-self:center}
+.fbranch{position:relative;display:grid;grid-template-columns:repeat(3,1fr);gap:12px;padding-top:22px}
+.fbranch::before{content:"";position:absolute;top:0;left:16.6%;right:16.6%;height:1px;background:var(--line2)}
+.fcol{position:relative;min-width:0}
+.fcol::before{content:"";position:absolute;top:-22px;left:50%;width:1px;height:22px;background:var(--line2)}
+.fgl{font-size:10.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin:10px 0 8px;text-align:center}
+.fitems{display:flex;flex-direction:column;gap:8px}
+.fitem{display:flex;align-items:center;gap:10px;border:1px solid var(--line);background:var(--surface);border-radius:9px;padding:8px 11px;cursor:pointer;text-align:left;width:100%;transition:border-color .15s,background .15s}
+.fitem:hover{border-color:var(--dim);background:var(--raise)}
+.fitem .fname{font-size:12.5px;font-weight:550}
+.lchips{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.lchip{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:550;padding:6px 12px;border-radius:8px;border:1px solid var(--line2);color:var(--acc)}
+a.lchip:hover{border-color:var(--acc);background:var(--acc-dim);text-decoration:none}
+.lchip.na{color:var(--dim);border-style:dashed}
+.pagehead .tag,.pagehead .count{margin-left:8px;vertical-align:3px}
+@media (max-width:860px){
+  .fbranch{grid-template-columns:1fr;padding-top:12px}
+  .fbranch::before,.fcol::before{display:none}
+  .dstats{grid-template-columns:repeat(2,1fr)}
+  .nav{white-space:nowrap}
+}
+/* ================= repos (deploy) ================= */
+.repos-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:16px}
+.repo-card{border:1px solid var(--line);border-radius:14px;padding:16px;background:var(--panel);display:flex;flex-direction:column;gap:12px;animation:v-in .4s var(--ease) both}
+.repo-fields{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.repo-fields .full{grid-column:1/-1}
+.repo-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.repo-group-title{font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin-bottom:6px}
+.repo-log{font-family:var(--mono);font-size:11.5px;line-height:1.7;background:var(--surface);border:1px solid var(--line);color:var(--mid);border-radius:8px;padding:8px 10px;max-height:170px;overflow:auto;white-space:pre-wrap;display:none}
+.repo-log.show{display:block}
+.repo-prog{height:4px;border-radius:4px;background:var(--line);overflow:hidden}
+.repo-prog i{display:block;height:100%;width:0;background:var(--acc);transition:width .25s var(--ease)}
+.repo-sec{border-top:1px dashed var(--line2);padding-top:10px}
+.repo-sec summary{cursor:pointer;font-size:12.5px;color:var(--mid);user-select:none}
+.repo-sec summary:hover{color:var(--text)}
+.sec-list{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;margin:10px 0;font-size:12px;color:var(--mid)}
+.sec-list label{display:flex;gap:6px;align-items:center;min-width:0;cursor:pointer}
+.sec-list label span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);font-size:11px}
+.xsec-row{display:grid;grid-template-columns:1fr 1fr auto;gap:6px;margin-top:6px}
+.repo-badge{font-family:var(--mono);font-size:11px;color:var(--dim)}
+.repo-head-lbl{font-weight:600;flex:1;border:none!important;background:transparent!important;box-shadow:none!important;padding:4px 2px;font-size:14.5px}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-mark" viewBox="0 0 24 24"><path d="M13.5 2 5 13h5.5L10 22l8.5-11H13l.5-9Z" fill="currentColor"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><path d="m21 2-2 2m-6.4 6.4L15 8m-2.4 2.4L17 6m-4.4 4.4a5.5 5.5 0 1 1-7.8 7.8 5.5 5.5 0 0 1 7.8-7.8ZM21 2l-4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="9.5" y="9.5" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9 2v3m6-3v3M9 19v3m6-3v3M2 9h3m-3 6h3m14-6h3m-3 6h3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+  <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M2 12h4l3-8 6 16 3-8h4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19V5a2 2 0 0 1 2-2h14v16H6a2 2 0 0 0-2 2Zm0 0a2 2 0 0 0 2 2h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-git" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="6" cy="18" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="18" cy="6" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M6 8.4v7.2M18 8.4c0 3.8-2.8 5.1-6.2 5.1H8.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
+  <symbol id="i-gen" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+  <symbol id="i-ext" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-out" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4m7 14 5-5-5-5m5 5H9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="14" y="3" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="3" y="14" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="14" y="14" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-mail" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m22 7-10 7L2 7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-flag" viewBox="0 0 24 24"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1v11Zm0 7v-7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M11 18h2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+  <symbol id="i-cube" viewBox="0 0 24 24"><path d="m12 2 8 4.5v11L12 22l-8-4.5v-11L12 2Zm0 20V11m8-4.5L12 11 4 6.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-img" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="9" cy="9" r="1.6" fill="currentColor"/><path d="m21 15-4.5-4.5L6 21" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6" cy="18" r="3" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="18" cy="16" r="3" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
+  <symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-3.6 8-10V5.5L12 2 4 5.5V12c0 6.4 8 10 8 10Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+</svg>
+
+<!-- ================= LOGIN ================= -->
+<div id="login">
+  <div class="login-box">
+    <div class="logomark"><svg><use href="#i-mark"/></svg></div>
+    <h1>Hermes Control</h1>
+    <p>Sign in to manage your agent's configuration vault.</p>
+    <div class="lfield">
+      <label for="em">Email</label>
+      <input id="em" type="email" autocomplete="username" placeholder="you@example.com">
+    </div>
+    <div class="lfield">
+      <label for="pw">Password</label>
+      <input id="pw" type="password" autocomplete="current-password" placeholder="••••••••">
+    </div>
+    <button class="btn btn-primary" id="in">Continue</button>
+    <div id="lmsg"></div>
+    <div class="login-foot">End-to-end private · secured by Firebase Auth</div>
+  </div>
+</div>
+
+<!-- ================= APP SHELL ================= -->
+<div id="app" class="hidden">
+  <aside>
+    <div class="side-brand">
+      <span class="m"><svg><use href="#i-mark"/></svg></span>
+      <div><b>Hermes</b><span>Control</span></div>
+    </div>
+    <div class="navlbl">Overview</div>
+    <button class="nav" role="tab" aria-selected="true" data-view="dash"><svg><use href="#i-grid"/></svg>Dashboard</button>
+    <button class="nav" role="tab" aria-selected="false" data-view="live"><svg><use href="#i-pulse"/></svg>Live run</button>
+    <div class="navlbl">Interfaces</div>
+    <button class="nav" role="tab" aria-selected="false" data-view="telegram"><svg><use href="#i-send"/></svg>Telegram</button>
+    <button class="nav" role="tab" aria-selected="false" data-view="slack"><svg><use href="#i-chat"/></svg>Slack</button>
+    <button class="nav" role="tab" aria-selected="false" data-view="email"><svg><use href="#i-mail"/></svg>Email</button>
+    <button class="nav" role="tab" aria-selected="false" data-view="facebook"><svg><use href="#i-flag"/></svg>Facebook Page</button>
+    <button class="nav" role="tab" aria-selected="false" data-view="hermesa"><svg><use href="#i-phone"/></svg>Hermesa phone</button>
+    <div class="navlbl">Models</div>
+    <button class="nav" role="tab" aria-selected="false" data-view="keys"><svg><use href="#i-key"/></svg>Model keys</button>
+    <button class="nav" role="tab" aria-selected="false" data-view="pool"><svg><use href="#i-cpu"/></svg>Model pool</button>
+    <button class="nav" role="tab" aria-selected="false" data-view="ollama"><svg><use href="#i-cube"/></svg>Local model</button>
+    <div class="navlbl">Automation</div>
+    <button class="nav" role="tab" aria-selected="false" data-view="zedge"><svg><use href="#i-img"/></svg>Zedge</button>
+    <button class="nav" role="tab" aria-selected="false" data-view="audio"><svg><use href="#i-music"/></svg>Stable Audio</button>
+    <button class="nav" role="tab" aria-selected="false" data-view="storage"><svg><use href="#i-db"/></svg>Storage &amp; voice</button>
+    <div class="navlbl">Deploy</div>
+    <button class="nav" role="tab" aria-selected="false" data-view="repos"><svg><use href="#i-git"/></svg>Repos</button>
+    <div class="navlbl">System</div>
+    <button class="nav" role="tab" aria-selected="false" data-view="access"><svg><use href="#i-shield"/></svg>Panel access</button>
+    <button class="nav" role="tab" aria-selected="false" data-view="setup"><svg><use href="#i-book"/></svg>Setup guide</button>
+    <div class="side-foot">
+      <div class="pill" id="conn"><span class="dot"></span><span id="connTxt">Connecting</span><span class="who" id="who"></span></div>
+      <div class="side-actions">
+        <button class="ttog" id="theme" aria-label="Toggle theme">
+          <svg class="sun"><use href="#i-sun"/></svg>
+          <svg class="moon"><use href="#i-moon"/></svg>
+        </button>
+        <button class="btn btn-ghost" id="out"><svg width="13" height="13"><use href="#i-out"/></svg>Sign out</button>
+      </div>
+    </div>
+  </aside>
+
+  <div class="content">
+
+    <!-- ================= DASHBOARD ================= -->
+    <div class="view" data-view="dash">
+      <div class="pagehead">
+        <h2>Dashboard</h2>
+        <p>Live overview of your agent — configuration health, pipeline flow and run links.</p>
+      </div>
+      <div class="dstats">
+        <div class="dstat"><div class="k">Agent</div><div class="v c-dim" id="dAgent">Offline</div></div>
+        <div class="dstat"><div class="k">Required setup</div><div class="v" id="dReq">0 / 4</div><div class="dbar"><i id="dReqBar"></i></div></div>
+        <div class="dstat"><div class="k">Interfaces</div><div class="v" id="dIf">0 / 5</div></div>
+        <div class="dstat"><div class="k">Model pool</div><div class="v" id="dPool">0</div></div>
+        <div class="dstat"><div class="k">Zedge accounts</div><div class="v" id="dZg">0</div></div>
+      </div>
+      <section class="sec">
+        <div class="sec-head"><h3>Pipeline flow</h3></div>
+        <p>How everything is wired together on each run. Click any node to open its settings page.</p>
+        <div class="flow">
+          <div class="fnode fmain" data-node="vault" data-go="access">
+            <span class="fico"><svg><use href="#i-key"/></svg></span>
+            <span class="ftxt"><span class="fname">Control panel · Firebase vault</span><span class="fsub">Loading…</span></span>
+            <span class="fdot"></span>
+          </div>
+          <div class="fdown"></div>
+          <div class="fnode fmain" data-node="agent" data-go="live">
+            <span class="fico"><svg><use href="#i-mark"/></svg></span>
+            <span class="ftxt"><span class="fname">Hermes agent · GitHub Actions</span><span class="fsub">Loading…</span></span>
+            <span class="fdot"></span>
+          </div>
+          <div class="fdown"></div>
+          <div class="fbranch">
+            <div class="fcol">
+              <div class="fgl">Interfaces</div>
+              <div class="fitems">
+              <button class="fitem" data-node="tg" data-go="telegram"><span class="ftxt"><span class="fname">Telegram</span><span class="fsub">—</span></span><span class="fdot"></span></button>
+              <button class="fitem" data-node="sl" data-go="slack"><span class="ftxt"><span class="fname">Slack</span><span class="fsub">—</span></span><span class="fdot"></span></button>
+              <button class="fitem" data-node="em" data-go="email"><span class="ftxt"><span class="fname">Email</span><span class="fsub">—</span></span><span class="fdot"></span></button>
+              <button class="fitem" data-node="fb" data-go="facebook"><span class="ftxt"><span class="fname">Facebook Page</span><span class="fsub">—</span></span><span class="fdot"></span></button>
+              <button class="fitem" data-node="hm" data-go="hermesa"><span class="ftxt"><span class="fname">Hermesa phone</span><span class="fsub">—</span></span><span class="fdot"></span></button>
+              </div>
+            </div>
+            <div class="fcol">
+              <div class="fgl">Model brain</div>
+              <div class="fitems">
+              <button class="fitem" data-node="keys" data-go="keys"><span class="ftxt"><span class="fname">API keys</span><span class="fsub">—</span></span><span class="fdot"></span></button>
+              <button class="fitem" data-node="pool" data-go="pool"><span class="ftxt"><span class="fname">Rotating pool</span><span class="fsub">—</span></span><span class="fdot"></span></button>
+              <button class="fitem" data-node="ol" data-go="ollama"><span class="ftxt"><span class="fname">Local model</span><span class="fsub">—</span></span><span class="fdot"></span></button>
+              </div>
+            </div>
+            <div class="fcol">
+              <div class="fgl">Pipelines</div>
+              <div class="fitems">
+              <button class="fitem" data-node="zg" data-go="zedge"><span class="ftxt"><span class="fname">Zedge uploader</span><span class="fsub">—</span></span><span class="fdot"></span></button>
+              <button class="fitem" data-node="sa" data-go="audio"><span class="ftxt"><span class="fname">Stable Audio</span><span class="fsub">—</span></span><span class="fdot"></span></button>
+              <button class="fitem" data-node="stor" data-go="storage"><span class="ftxt"><span class="fname">Memory & storage</span><span class="fsub">—</span></span><span class="fdot"></span></button>
+              </div>
+            </div>
+          </div>
+          <div class="fdown"></div>
+          <div class="fnode fmain" data-node="live" data-go="live">
+            <span class="fico"><svg><use href="#i-ext"/></svg></span>
+            <span class="ftxt"><span class="fname">Live surfaces · Cloudflare tunnels</span><span class="fsub">Loading…</span></span>
+            <span class="fdot"></span>
+          </div>
+        </div>
+        <div class="lchips" id="dLinks"></div>
+      </section>
+    </div>
+
+    <div class="view hidden" data-view="access">
+      <div class="pagehead">
+        <h2>Panel access <span class="tag tag-req">Required</span></h2>
+        <p>A single password protects the model panel, WebUI, dashboard and live desktop.</p>
+      </div>
+      <section class="sec">
+        <div class="row">
+          <div class="lab"><code>PANEL_TOKEN</code><small>Minimum 8 characters</small></div>
+          <div class="ctl">
+            <input id="PANEL_TOKEN" type="password" autocomplete="off" placeholder="Enter or generate a token">
+            <button class="icobtn" data-eye="PANEL_TOKEN" title="Show / hide" aria-label="Show or hide"><svg><use href="#i-eye"/></svg></button>
+            <button class="icobtn" id="genTok" title="Generate strong token" aria-label="Generate token"><svg><use href="#i-gen"/></svg></button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="view hidden" data-view="telegram">
+      <div class="pagehead">
+        <h2>Telegram <span class="tag tag-req">Required</span></h2>
+        <p>The primary chat interface for your agent.</p>
+      </div>
+      <section class="sec">
+        <div class="row">
+          <div class="lab"><code>TELEGRAM_BOT_TOKEN</code><small>From @BotFather</small></div>
+          <div class="ctl">
+            <input id="TELEGRAM_BOT_TOKEN" type="password" autocomplete="off" placeholder="123456:ABC…">
+            <button class="icobtn" data-eye="TELEGRAM_BOT_TOKEN" title="Show / hide" aria-label="Show or hide"><svg><use href="#i-eye"/></svg></button>
+          </div>
+        </div>
+        <div class="row">
+          <div class="lab"><code>TELEGRAM_USER_ID</code><small>Your numeric chat ID</small></div>
+          <div class="ctl"><input id="TELEGRAM_USER_ID" type="text" autocomplete="off" placeholder="123456789"></div>
+        </div>
+        <div class="row">
+          <div class="lab"><code>TELEGRAM_GROUP_IDS</code><small>Optional &mdash; group chat IDs the agent manages as admin (one box per group, first = default; click + to add more). Make the bot a group admin, then get the ID (starts with -100) by forwarding a group message to @userinfobot or from the group&rsquo;s web link.</small></div>
+          <div class="ctl" style="flex-direction:column;align-items:stretch">
+            <div id="tgRows"></div>
+            <div class="acct-foot">
+              <button type="button" class="icobtn acct-add" id="tgAdd" title="Add another group ID" aria-label="Add another group ID">+</button>
+              <span class="count" id="tgGN"></span>
+            </div>
+            <input id="TELEGRAM_GROUP_IDS" type="text" autocomplete="off" style="display:none" aria-hidden="true">
+          </div>
+        </div>
+        <div class="row">
+          <div class="lab"><code>TELEGRAM_GROUP_ROLE</code><small>Group power level for THIS deployment. <b>auto</b> = admin commands work only if this bot is truly a group admin (checked live). <b>member</b> = group admin commands hard-disabled &mdash; choose this for every user who is not the group owner.</small></div>
+          <div class="ctl"><select id="TELEGRAM_GROUP_ROLE"><option value="">auto &mdash; follow the bot&rsquo;s real Telegram rights (default)</option><option value="member">member &mdash; no group admin powers, chat/reply only</option></select></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="view hidden" data-view="facebook">
+      <div class="pagehead">
+        <h2>Facebook Page <span class="tag tag-opt">Optional</span></h2>
+        <p>Let the agent fully manage a Facebook Page &mdash; posts, native scheduling, photos/videos, comments &amp; moderation, Messenger replies, insights.</p>
+      </div>
+      <section class="sec">
+        <div class="row">
+          <div class="lab"><code>FACEBOOK_PAGE_TOKEN</code><small>Page access token. Get it: developers.facebook.com &rarr; your app &rarr; Graph API Explorer &rarr; user token with pages_manage_posts, pages_read_engagement, pages_manage_engagement, pages_read_user_content, pages_messaging, read_insights &rarr; GET <b>/me/accounts</b> &rarr; copy the page&rsquo;s access_token (long-lived user token gives a never-expiring page token). <b>Multi-page:</b> paste the long-lived USER token itself and the agent can manage every page you own. Click <b>+</b> below to add more tokens &mdash; each token keeps its own page-ID list; first token = default.</small></div>
+          <div class="ctl" style="flex-direction:column;align-items:stretch">
+            <div id="fbCards"></div>
+            <div class="acct-foot">
+              <button type="button" class="icobtn acct-add" id="fbAdd" title="Add another token" aria-label="Add another token">+</button>
+              <span class="count" id="fbN"></span>
+            </div>
+            <textarea id="FACEBOOK_PAGE_TOKEN" rows="2" spellcheck="false" style="display:none" aria-hidden="true"></textarea>
+            <textarea id="FACEBOOK_PAGE_ID" rows="2" spellcheck="false" style="display:none" aria-hidden="true"></textarea>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="view hidden" data-view="slack">
+      <div class="pagehead">
+        <h2>Slack <span class="tag tag-opt">Optional</span></h2>
+        <p>Connect a Slack workspace as a second interface.</p>
+      </div>
+      <section class="sec">
+        <div class="row">
+          <div class="lab"><code>SLACK_BOT_TOKEN</code></div>
+          <div class="ctl">
+            <input id="SLACK_BOT_TOKEN" type="password" autocomplete="off" placeholder="xoxb-…">
+            <button class="icobtn" data-eye="SLACK_BOT_TOKEN" title="Show / hide" aria-label="Show or hide"><svg><use href="#i-eye"/></svg></button>
+          </div>
+        </div>
+        <div class="row">
+          <div class="lab"><code>SLACK_APP_TOKEN</code></div>
+          <div class="ctl">
+            <input id="SLACK_APP_TOKEN" type="password" autocomplete="off" placeholder="xapp-…">
+            <button class="icobtn" data-eye="SLACK_APP_TOKEN" title="Show / hide" aria-label="Show or hide"><svg><use href="#i-eye"/></svg></button>
+          </div>
+        </div>
+        <div class="row">
+          <div class="lab"><code>SLACK_USER_ID</code></div>
+          <div class="ctl"><input id="SLACK_USER_ID" type="text" autocomplete="off" placeholder="U0123456789"></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="view hidden" data-view="email">
+      <div class="pagehead">
+        <h2>Email accounts <span class="tag tag-opt">Optional</span></h2>
+        <p>Lets the agent check, analyse, send (bulk or one-by-one) and clean your inbox &mdash; <b>multiple accounts supported</b>. Add each account with its <b>app password</b> (spaces are removed automatically). The <b>first account is the default</b>. Create app passwords: <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">Gmail</a> &middot; <a href="https://login.yahoo.com/account/security" target="_blank" rel="noopener">Yahoo</a> &middot; <a href="https://account.live.com/proofs/AppPassword" target="_blank" rel="noopener">Outlook / Hotmail</a> (requires 2-Step Verification &mdash; NOT your normal password).</p>
+      </div>
+      <section class="sec">
+        <div class="row">
+          <div class="lab"><code>GMAIL_ACCOUNTS</code><small>One box for the address, one for the app password. Click + to add more accounts.</small></div>
+          <div class="ctl" style="flex-direction:column;align-items:stretch">
+            <div id="emailRows"></div>
+            <div class="acct-foot">
+              <button type="button" class="icobtn acct-add" id="addAcct" title="Add another account" aria-label="Add another account">+</button>
+              <div class="count"><b id="gmN">0</b> accounts</div>
+            </div>
+            <textarea id="GMAIL_ACCOUNTS" rows="2" spellcheck="false" style="display:none" aria-hidden="true"></textarea>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="view hidden" data-view="storage">
+      <div class="pagehead">
+        <h2>Storage & voice <span class="tag tag-opt">Optional</span></h2>
+        <p>A private repo persists memory between runs; Groq powers voice replies.</p>
+      </div>
+      <section class="sec">
+        <div class="row">
+          <div class="lab"><code>DATA_REPO</code><small>user/repo</small></div>
+          <div class="ctl"><input id="DATA_REPO" type="text" autocomplete="off" placeholder="user/private-storage"></div>
+        </div>
+        <div class="row">
+          <div class="lab"><code>DATA_REPO_TOKEN</code><small>Fine-grained PAT with contents access</small></div>
+          <div class="ctl">
+            <input id="DATA_REPO_TOKEN" type="password" autocomplete="off" placeholder="github_pat_…">
+            <button class="icobtn" data-eye="DATA_REPO_TOKEN" title="Show / hide" aria-label="Show or hide"><svg><use href="#i-eye"/></svg></button>
+          </div>
+        </div>
+        <div class="row">
+          <div class="lab"><code>GROQ_API_KEY</code></div>
+          <div class="ctl">
+            <input id="GROQ_API_KEY" type="password" autocomplete="off" placeholder="gsk_…">
+            <button class="icobtn" data-eye="GROQ_API_KEY" title="Show / hide" aria-label="Show or hide"><svg><use href="#i-eye"/></svg></button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="view hidden" data-view="audio">
+      <div class="pagehead">
+        <h2>Stable Audio <span class="tag tag-opt">Optional</span></h2>
+        <p>Generates high-fidelity AI ringtones via Stable Audio v2.5 with automatic FFmpeg silence trimming. If left empty, Playwright stealth mode will automatically provision free account tokens when needed.</p>
+      </div>
+      <section class="sec">
+        <div class="row">
+          <div class="lab"><code>STABLE_AUDIO_TOKEN</code><small>Stable Audio Bearer Token (optional)</small></div>
+          <div class="ctl">
+            <input id="STABLE_AUDIO_TOKEN" type="password" autocomplete="off" placeholder="eyJhbGciOiJSUzI1Ni...">
+            <button class="icobtn" data-eye="STABLE_AUDIO_TOKEN" title="Show / hide" aria-label="Show or hide"><svg><use href="#i-eye"/></svg></button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="view hidden" data-view="hermesa">
+      <div class="pagehead">
+        <h2>Hermesa phone <span class="tag tag-opt">Optional</span></h2>
+        <p>Lets the agent push real-time notifications, images, files and full-screen <b>voice calls</b> to your phone through the Hermesa Android app. Copy the Bot ID from Hermesa &rarr; your bot &rarr; <b>PC Integration / Code Snippets</b>. The database URL comes from the <span class="mono">HERMESA_DB_URL</span> GitHub secret.</p>
+      </div>
+      <section class="sec">
+        <div class="row">
+          <div class="lab"><code>HERMESA_BOT_ID</code><small>Bot ID from the Hermesa app (PC Integration screen). Click <b>+</b> to add more bots &mdash; first = default; saved comma-separated.</small></div>
+          <div class="ctl" style="flex-direction:column;align-items:stretch">
+            <div id="hmRows"></div>
+            <div class="acct-foot">
+              <button type="button" class="icobtn acct-add" id="hmAdd" title="Add another bot ID" aria-label="Add another bot ID">+</button>
+              <span class="count" id="hmN"></span>
+            </div>
+            <input id="HERMESA_BOT_ID" type="text" autocomplete="off" style="display:none" aria-hidden="true">
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="view hidden" data-view="zedge">
+      <div class="pagehead">
+        <h2>Zedge automation <span class="tag tag-opt">Optional</span></h2>
+        <p>Lets the agent run the <b>Zedge wallpaper &amp; ringtone pipeline</b> end-to-end <b>on the agent's own machine</b>: queue files, edit metadata, requeue/delete items and run the inbuilt Playwright upload bot locally &mdash; no separate GitHub repo or token needed. Add <b>one card per Zedge account</b> (up to 3) &mdash; each with its own login, proxy and optional browser-only VPN. Each account needs its <b>own</b> Firebase database URL &mdash; no defaults are baked in, set them below. All accounts share <b>one</b> R2 gateway worker; files stay separate per account automatically.</p>
+      </div>
+      <section class="sec">
+        <div class="row">
+          <div class="lab"><code>Zedge accounts</code><small>One card = one account. Give each account its <b>own</b> proxy or VPN &mdash; sharing one IP across accounts risks suspension. Click <b>+ Add Zedge account</b> for more (max 3).</small></div>
+          <div class="ctl" style="flex-direction:column;align-items:stretch">
+            <div id="zedgeCards"></div>
+            <div class="acct-foot">
+              <button type="button" class="btn btn-ghost" id="zedgeAdd">+ Add Zedge account</button>
+              <span class="count"><b id="zdN">0</b> account(s) &middot; max 3</span>
+            </div>
+            <textarea id="ZEDGE_ACCOUNTS" style="display:none" aria-hidden="true"></textarea>
+            <textarea id="ZEDGE_PROXIES" style="display:none" aria-hidden="true"></textarea>
+            <textarea id="ZEDGE_WG_1" style="display:none" aria-hidden="true"></textarea>
+            <textarea id="ZEDGE_WG_2" style="display:none" aria-hidden="true"></textarea>
+            <textarea id="ZEDGE_WG_3" style="display:none" aria-hidden="true"></textarea>
+            <textarea id="ZEDGE_DB_URL_1" style="display:none" aria-hidden="true"></textarea>
+            <textarea id="ZEDGE_DB_URL_2" style="display:none" aria-hidden="true"></textarea>
+            <textarea id="ZEDGE_DB_URL_3" style="display:none" aria-hidden="true"></textarea>
+          </div>
+        </div>
+        <div class="row">
+          <div class="lab"><code>ZEDGE_R2_WORKER_URL</code><small>Cloudflare R2 gateway worker &mdash; <b>one for all accounts</b>; files stay separate per account automatically (required &mdash; no built-in default)</small></div>
+          <div class="ctl"><input id="ZEDGE_R2_WORKER_URL" type="text" autocomplete="off" placeholder="https://&hellip;.workers.dev"></div>
+        </div>
+        <div class="row">
+          <div class="lab"><code>Test connections</code><small>Browsers can&rsquo;t open VPN/proxy sockets, so this runs a <b>real</b> test on a GitHub runner and streams the result back here. <b>Save</b> your config &amp; <b>push the repo</b> first (the test uses your first repo card&rsquo;s token). Don&rsquo;t run while the agent already has a VPN up.</small></div>
+          <div class="ctl" style="flex-direction:column;align-items:stretch">
+            <button type="button" class="btn btn-primary" id="connTestBtn">Test VPN &amp; proxies</button>
+            <div id="connTestOut" class="repo-badge" style="margin-top:10px;white-space:pre-wrap">No test run yet.</div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="view hidden" data-view="ollama">
+      <div class="pagehead">
+        <h2>Local model <span class="tag tag-opt">Optional</span></h2>
+        <p>The Ollama model pulled at startup and exposed as <span class="mono">/model gemma</span>.</p>
+      </div>
+      <section class="sec">
+        <div class="row">
+          <div class="lab"><code>OLLAMA_MODEL</code></div>
+          <div class="ctl"><input id="OLLAMA_MODEL" type="text" autocomplete="off" placeholder="gemma4:e2b"></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="view hidden" data-view="keys">
+      <div class="pagehead">
+        <h2>Model keys</h2>
+        <p>API keys for the model pool. One per line — the router rotates automatically on rate limits.</p>
+      </div>
+      <section class="sec">
+        <div class="sec-head"><h3>NVIDIA</h3></div>
+        <div class="row">
+          <div class="lab"><code>NVIDIA_KEYS</code><small>build.nvidia.com API keys</small></div>
+          <div class="ctl" style="flex-direction:column;align-items:stretch">
+            <textarea id="NVIDIA_KEYS" rows="6" spellcheck="false" placeholder="nvapi-…&#10;nvapi-…"></textarea>
+            <div class="count"><b id="nvN">0</b> keys</div>
+          </div>
+        </div>
+      </section>
+      <section class="sec">
+        <div class="sec-head"><h3>Mistral</h3></div>
+        <div class="row">
+          <div class="lab"><code>MISTRAL_KEYS</code><small>console.mistral.ai API keys</small></div>
+          <div class="ctl" style="flex-direction:column;align-items:stretch">
+            <textarea id="MISTRAL_KEYS" rows="6" spellcheck="false" placeholder="key-1&#10;key-2"></textarea>
+            <div class="count"><b id="msN">0</b> keys</div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="view hidden" data-view="pool">
+      <div class="pagehead">
+        <h2>Model pool</h2>
+        <p>Build your own list of working NVIDIA + Mistral models, test them, and apply the rotating pool — straight from this page. No separate panel needed.</p>
+      </div>
+
+      <section class="sec">
+        <div class="sec-head"><h3>Your model list</h3><span class="tag tag-opt" id="poolState">0 models</span></div>
+        <p>Type the model IDs you want to use - one per line. Tick the ones that work; only ticked models go into the rotating pool. Use <b>✕</b> on a row to delete that model, then press <b>Apply pool</b> to save.</p>
+        <div class="pool-stats">
+          <div class="pstat"><div class="k">NVIDIA keys</div><div class="v" id="pNvKeys">0</div><div class="s">rotating</div></div>
+          <div class="pstat"><div class="k">Mistral keys</div><div class="v" id="pMsKeys">0</div><div class="s">rotating</div></div>
+          <div class="pstat"><div class="k">Your list</div><div class="v" id="pCat">0</div><div class="s">models entered</div></div>
+          <div class="pstat"><div class="k">Selected</div><div class="v" id="pSel">0</div><div class="s">in rotating pool</div></div>
+        </div>
+
+        <div class="row">
+          <div class="lab"><code>NVIDIA models</code><small>build.nvidia.com model IDs</small></div>
+          <div class="ctl" style="flex-direction:column;align-items:stretch">
+            <textarea id="NV_MODELS" rows="5" spellcheck="false" placeholder="meta/llama-3.3-70b-instruct&#10;qwen/qwen2.5-coder-32b-instruct"></textarea>
+            <div class="count"><b id="nvMn">0</b> models</div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="lab"><code>Mistral models</code><small>console.mistral.ai model IDs</small></div>
+          <div class="ctl" style="flex-direction:column;align-items:stretch">
+            <textarea id="MS_MODELS" rows="5" spellcheck="false" placeholder="mistral-large-latest&#10;mistral-small-latest"></textarea>
+            <div class="count"><b id="msMn">0</b> models</div>
+          </div>
+        </div>
+
+        <div class="pool-bar">
+          <input class="search" id="mFilter" placeholder="Filter your list…" autocomplete="off">
+          <button class="btn btn-ghost" id="mSelAll">Select filtered</button>
+          <button class="btn btn-ghost" id="mClear">Clear</button>
+          <button class="btn btn-ghost" id="mOnly">Show selected</button>
+          <button class="btn btn-ghost" id="mTestSel">Test selected</button>
+          <button class="btn btn-primary" id="mApply">Apply pool</button>
+        </div>
+        <div class="pool-prog"><i id="mProg"></i></div>
+        <div class="mlist" id="mList"><div class="mempty">Add model IDs above to build your list.</div></div>
+        <div class="meta-line" id="poolMeta" style="margin-top:10px">No pool saved yet.</div>
+        <div class="chiprow" id="poolChips"></div>
+      </section>
+
+      <section class="sec">
+        <div class="sec-head"><h3>Browser access</h3><span class="tag tag-opt">Optional</span></div>
+        <p><b>Test</b> calls the provider API straight from your browser, and NVIDIA/Mistral block cross-origin browser calls. To make testing work, add a CORS proxy — use <span class="mono">{url}</span> as the placeholder, otherwise the encoded URL is appended. Without a proxy you can still build and apply your list; the runner validates every model at startup.</p>
+        <div class="row">
+          <div class="lab"><code>CORS proxy</code><small>stored locally in this browser only</small></div>
+          <div class="ctl"><input id="proxyUrl" type="text" autocomplete="off" placeholder="https://corsproxy.io/?url={url}"></div>
+        </div>
+        <div class="note">
+          <svg><use href="#i-warn"/></svg>
+          <div>The applied pool is stored in your Firebase vault as <code>MODEL_POOL</code>. The workflow reads it at startup and builds the LiteLLM router — every selected model also joins the auto-rotating <span class="mono">pool-auto</span> group.</div>
+        </div>
+      </section>
+    </div>
+
+    <div class="view hidden" data-view="live">
+      <div class="pagehead">
+        <h2>Live run</h2>
+        <p>The workflow publishes its status and links here on every start.</p>
+      </div>
+      <section class="sec">
+        <div class="sec-head"><h3>Status</h3><span class="tag tag-opt" id="runState">unknown</span></div>
+        <div class="meta-line" id="runMeta">Waiting for the first run to report in…</div>
+        <div class="rungrid" id="runLinks"></div>
+      </section>
+      <section class="sec">
+        <div class="sec-head"><h3>How links behave</h3></div>
+        <p>Every public link is a Cloudflare quick tunnel (<span class="mono">trycloudflare.com</span>).
+           They are generated fresh on each run, so always use the newest links from the Telegram start
+           message or from the Live run tab above.</p>
+        <table class="spec">
+          <tr><th>Surface</th><th>Address</th></tr>
+          <tr><td>Hermes WebUI</td><td>random trycloudflare link</td></tr>
+          <tr><td>Live desktop</td><td>random trycloudflare link</td></tr>
+          <tr><td>Dashboard</td><td>random trycloudflare link</td></tr>
+          <tr><td>Camofox browser</td><td>random trycloudflare link</td></tr>
+        </table>
+      </section>
+    </div>
+
+    <div class="view hidden" data-view="setup">
+      <div class="pagehead">
+        <h2>Setup guide</h2>
+        <p>One-time setup. After this, everything is managed from this page.</p>
+      </div>
+      <section class="sec">
+        <div class="step">
+          <div class="n">1</div>
+          <div><h4>Create a Firebase project</h4>
+          <p>console.firebase.google.com → Add project → create a Realtime Database in locked mode.
+             Enable Authentication → Email/Password, add one user, then block new sign-ups under
+             Authentication → Settings → User actions.</p></div>
+        </div>
+        <div class="step">
+          <div class="n">2</div>
+          <div><h4>Publish database rules</h4>
+          <p>Realtime Database → Rules → replace with the JSON below, then Publish.</p>
+          <pre>{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "secrets":  { "$uid": {
+      ".read":  "auth != null &amp;&amp; auth.uid === $uid",
+      ".write": "auth != null &amp;&amp; auth.uid === $uid" } },
+    "runtime":  { "$uid": {
+      ".read":  "auth != null &amp;&amp; auth.uid === $uid",
+      ".write": "auth != null &amp;&amp; auth.uid === $uid" } }
+  }
+}</pre></div>
+        </div>
+        <div class="step">
+          <div class="n">3</div>
+          <div><h4>Host this page</h4>
+          <p>The <code>firebaseConfig</code> at the bottom of this file is already set for project
+             <code>myhermess</code>. Push the file to a repo as <code>index.html</code> and enable GitHub
+             Pages — it contains no secrets, so public hosting is safe.</p></div>
+        </div>
+        <div class="step">
+          <div class="n">4</div>
+          <div><h4>Add 4 bootstrap secrets to GitHub</h4>
+          <p>Repo → Settings → Secrets → Actions: <code>FIREBASE_API_KEY</code>, <code>FIREBASE_DB_URL</code>,
+             <code>FIREBASE_EMAIL</code>, <code>FIREBASE_PASSWORD</code>. These are the only GitHub secrets
+             you will ever touch again.</p></div>
+        </div>
+        <div class="note">
+          <svg><use href="#i-warn"/></svg>
+          <div>Values saved in this vault override GitHub secrets of the same name. Empty fields fall back to
+          GitHub secrets, so you can migrate gradually — nothing breaks while the vault is empty.</div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ================= REPOS ================= -->
+    <div class="view hidden" data-view="repos">
+      <div class="pagehead">
+        <h2>Repos <span class="tag tag-opt">Deploy</span></h2>
+        <p>Push files and sync Actions secrets to any GitHub repository straight from this panel — one card per repo &amp; account. Everything runs in your browser via the GitHub API.</p>
+      </div>
+      <section class="sec">
+        <div class="sec-head"><h3>Your repositories</h3><span class="tag tag-opt" id="reposCount">0</span></div>
+        <p>Each card holds its own token, so different cards can target different GitHub accounts. “Push files” uploads a chosen folder as a single clean commit. “Push secrets” encrypts values locally in your browser and saves them as GitHub Actions repo secrets.</p>
+        <div class="repo-actions" style="margin-bottom:16px">
+          <button class="btn btn-primary" id="repoAdd">+ Add repository</button>
+          <button class="btn btn-ghost" id="repoSaveBtn">Save list</button>
+          <span class="repo-badge">cards sync to your Firebase vault</span>
+        </div>
+        <div class="repos-grid" id="reposGrid"></div>
+      </section>
+    </div>
+
+  </div>
+</div>
+
+<div class="hidden" id="savebar">
+  <div id="meta">No changes yet</div>
+  <button class="btn btn-ghost" id="reload">Discard</button>
+  <button class="btn btn-primary" id="save" disabled>Save changes</button>
+</div>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script type="module">
+/* ================== CONFIG (safe to publish) ================== */
+const firebaseConfig = {
+  apiKey: "AIzaSyAj-Nv9L5BkV5bJE8wEEaUwLXnnoiV24wI",
+  authDomain: "myhermess.firebaseapp.com",
+  databaseURL: "https://myhermess-default-rtdb.firebaseio.com",
+  projectId: "myhermess",
+  storageBucket: "myhermess.firebasestorage.app",
+  messagingSenderId: "287724392846",
+  appId: "1:287724392846:web:40ce3ba65e999dc30c14df",
+  measurementId: "G-7KL7TKSV0F",
+};
+/* =============================================================== */
+
+const FIELDS = [
+  "PANEL_TOKEN","TELEGRAM_BOT_TOKEN","TELEGRAM_USER_ID","TELEGRAM_GROUP_IDS","TELEGRAM_GROUP_ROLE","FACEBOOK_PAGE_TOKEN","FACEBOOK_PAGE_ID",
+  "SLACK_BOT_TOKEN","SLACK_APP_TOKEN","SLACK_USER_ID",
+  "DATA_REPO","DATA_REPO_TOKEN","GROQ_API_KEY","OLLAMA_MODEL",
+  "STABLE_AUDIO_TOKEN","HERMESA_BOT_ID",
+  "ZEDGE_ACCOUNTS","ZEDGE_PROXIES",
+  "ZEDGE_WG_1","ZEDGE_WG_2","ZEDGE_WG_3",
+  "ZEDGE_R2_WORKER_URL",
+  "ZEDGE_DB_URL_1","ZEDGE_DB_URL_2","ZEDGE_DB_URL_3",
+  "GMAIL_ACCOUNTS",
+  "NVIDIA_KEYS","MISTRAL_KEYS",
+  "NV_MODELS","MS_MODELS",
+];
+const $ = (id) => document.getElementById(id);
+
+/* ---------- theme ---------- */
+const THEME_KEY = "hermes-theme";
+const applyTheme = (t) => document.documentElement.dataset.theme = t;
+applyTheme(localStorage.getItem(THEME_KEY) || "dark");
+$("theme").onclick = () => {
+  const t = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  localStorage.setItem(THEME_KEY, t);
+  applyTheme(t);
+};
+
+/* ---------- helpers ---------- */
+let toastTimer;
+function toast(msg, ok = true){
+  const el = $("toast");
+  el.textContent = msg;
+  el.className = ok ? "show" : "show err";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (el.className = ""), 3200);
+}
+function setConn(state, txt){
+  $("conn").dataset.state = state;
+  $("connTxt").textContent = txt;
+}
+document.querySelectorAll("[data-eye]").forEach((b) => {
+  b.onclick = () => {
+    const i = $(b.dataset.eye);
+    i.type = i.type === "password" ? "text" : "password";
+  };
+});
+$("genTok").onclick = () => {
+  const a = new Uint8Array(24);
+  crypto.getRandomValues(a);
+  $("PANEL_TOKEN").value = Array.from(a, (x) => x.toString(16).padStart(2, "0")).join("");
+  $("PANEL_TOKEN").type = "text";
+  markDirty();
+  toast("Strong token generated");
+};
+
+/* ---------- nav ---------- */
+function showView(name){
+  document.querySelectorAll(".nav").forEach((x) =>
+    x.setAttribute("aria-selected", String(x.dataset.view === name)));
+  document.querySelectorAll(".view").forEach((v) => {
+    const active = v.dataset.view === name;
+    v.classList.toggle("hidden", !active);
+    if (active){ v.style.animation = "none"; void v.offsetWidth; v.style.animation = ""; }
+  });
+  const sc = document.scrollingElement;
+  if (sc) sc.scrollTop = 0;
+  if (name === "dash") renderDash();
+}
+document.querySelectorAll(".nav").forEach((t) => { t.onclick = () => showView(t.dataset.view); });
+document.querySelectorAll("[data-go]").forEach((el) => {
+  el.addEventListener("click", () => showView(el.dataset.go));
+});
+
+/* ---------- counters ---------- */
+const countKeys = (s) => (s || "").split(/[\n,]+/).map((x) => x.trim()).filter(Boolean).length;
+function refreshCounters(){
+  $("nvN").textContent = countKeys($("NVIDIA_KEYS").value);
+  $("msN").textContent = countKeys($("MISTRAL_KEYS").value);
+  $("gmN").textContent = countKeys($("GMAIL_ACCOUNTS").value);
+}
+
+/* ---------- dirty tracking ---------- */
+let saved = {};
+function snapshot(){
+  const o = {};
+  for (const k of FIELDS) o[k] = $(k).value.trim();
+  return o;
+}
+function fill(data){
+  for (const k of FIELDS) $(k).value = (data && data[k]) || "";
+  renderEmailRows();
+  renderHmRows();
+  renderTgRows();
+  renderFbCards();
+  renderZedgeCards();
+  refreshDropdowns();
+  saved = snapshot();
+  refreshCounters();
+  markDirty();
+  rebuildCatalog();   // model list textareas are vault fields too
+}
+function dirtyKeys(){
+  const now = snapshot();
+  return FIELDS.filter((k) => now[k] !== (saved[k] || ""));
+}
+function validate(){
+  const v = snapshot(), problems = [];
+  if (v.PANEL_TOKEN && v.PANEL_TOKEN.length < 8) problems.push("PANEL_TOKEN must be at least 8 characters");
+  if (v.TELEGRAM_BOT_TOKEN && !/^\d+:/.test(v.TELEGRAM_BOT_TOKEN)) problems.push("TELEGRAM_BOT_TOKEN should start with digits:");
+  if (v.TELEGRAM_USER_ID && !/^-?\d+$/.test(v.TELEGRAM_USER_ID)) problems.push("TELEGRAM_USER_ID must be numeric");
+  if (v.TELEGRAM_GROUP_IDS && !/^\s*-?\d+(\s*,\s*-?\d+)*\s*$/.test(v.TELEGRAM_GROUP_IDS)) problems.push("TELEGRAM_GROUP_IDS must be comma-separated numeric chat IDs (group IDs usually start with -100)");
+  for (const line of String(v.FACEBOOK_PAGE_ID || "").split("\n")) {
+    const t = line.trim();
+    if (t && !/^\d+(\s*,\s*\d+)*$/.test(t)) { problems.push("Facebook page IDs must be numeric (leave boxes empty for auto-detect)"); break; }
+  }
+  for (const line of (v.GMAIL_ACCOUNTS || "").split("\n")) {
+    const t = line.trim();
+    if (t && !/^[^\s@:]+@[^\s@:]+\.[^\s@:]+\s*:\s*\S+$/.test(t)) { problems.push("Email accounts: every account needs a valid address AND an app password"); break; }
+  }
+  return problems;
+}
+function markDirty(){
+  const d = dirtyKeys(), bar = $("savebar");
+  refreshCounters();
+  renderDash();
+  if (!d.length){
+    $("meta").textContent = "No changes yet";
+    $("save").disabled = true;
+    bar.classList.add("hidden");
+    return;
+  }
+  bar.classList.remove("hidden");
+  const problems = validate();
+  if (problems.length){
+    $("meta").innerHTML = "<strong>" + problems[0] + "</strong>";
+    $("save").disabled = true;
+  } else {
+    $("meta").innerHTML = "<strong>" + d.length + " unsaved change" + (d.length > 1 ? "s" : "") + "</strong> · " + d.join(", ");
+    $("save").disabled = false;
+  }
+}
+for (const k of FIELDS) $(k).addEventListener("input", markDirty);
+
+/* ---------- email accounts UI (Gmail / Yahoo / Outlook, multi) ---------- */
+const stripPw = (s) => (s || "").replace(/\s+/g, "");
+function parseAccounts(text){
+  return (text || "").split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
+    const i = l.indexOf(":");
+    return i < 0 ? { email: l, pw: "" }
+                 : { email: l.slice(0, i).trim(), pw: stripPw(l.slice(i + 1)) };
+  });
+}
+function syncAccounts(){
+  const lines = [];
+  document.querySelectorAll("#emailRows .acct-row").forEach((r) => {
+    const email = r.querySelector(".acct-em").value.trim();
+    const pw = stripPw(r.querySelector(".acct-pw").value);
+    if (email || pw) lines.push(email + " : " + pw);
+  });
+  $("GMAIL_ACCOUNTS").value = lines.join("\n");
+  markDirty();
+}
+function addAcctRow(email = "", pw = ""){
+  const row = document.createElement("div");
+  row.className = "acct-row";
+  row.innerHTML =
+    '<input class="acct-em" type="email" autocomplete="off" spellcheck="false" placeholder="you@gmail.com / @yahoo.com / @outlook.com">' +
+    '<input class="acct-pw" type="password" autocomplete="off" placeholder="app password (spaces auto-removed)">' +
+    '<button type="button" class="icobtn acct-eye" title="Show / hide" aria-label="Show or hide password"><svg><use href="#i-eye"/></svg></button>' +
+    '<button type="button" class="icobtn acct-del" title="Remove this account" aria-label="Remove this account">&#215;</button>';
+  const em = row.querySelector(".acct-em"), pwEl = row.querySelector(".acct-pw");
+  em.value = email; pwEl.value = pw;
+  em.addEventListener("input", syncAccounts);
+  pwEl.addEventListener("input", () => {
+    const clean = stripPw(pwEl.value);
+    if (clean !== pwEl.value) pwEl.value = clean; /* app passwords never keep spaces */
+    syncAccounts();
+  });
+  row.querySelector(".acct-eye").onclick = () => {
+    pwEl.type = pwEl.type === "password" ? "text" : "password";
+  };
+  row.querySelector(".acct-del").onclick = () => {
+    row.remove();
+    if (!document.querySelector("#emailRows .acct-row")) addAcctRow();
+    syncAccounts();
+  };
+  $("emailRows").appendChild(row);
+  return row;
+}
+function renderEmailRows(){
+  $("emailRows").innerHTML = "";
+  const accts = parseAccounts($("GMAIL_ACCOUNTS").value);
+  if (!accts.length) addAcctRow();
+  else accts.forEach((a) => addAcctRow(a.email, a.pw));
+}
+$("addAcct").onclick = () => { addAcctRow().querySelector(".acct-em").focus(); };
+renderEmailRows();
+
+/* ---------- Hermesa bot IDs UI (multi) ---------- */
+function hmCount(){
+  const k = countKeys($("HERMESA_BOT_ID").value);
+  $("hmN").textContent = k ? k + " bot" + (k > 1 ? "s" : "") : "";
+}
+function syncHmRows(){
+  const ids = [];
+  document.querySelectorAll("#hmRows .hm-id").forEach((i) => { const v = i.value.trim(); if (v) ids.push(v); });
+  $("HERMESA_BOT_ID").value = ids.join(", ");
+  hmCount();
+  markDirty();
+}
+function addHmRow(val = ""){
+  const row = document.createElement("div");
+  row.className = "acct-row";
+  row.innerHTML =
+    '<input class="hm-id" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. bot_8f3a2b91">' +
+    '<button type="button" class="icobtn acct-del" title="Remove this bot ID" aria-label="Remove this bot ID">&#215;</button>';
+  const inp = row.querySelector(".hm-id");
+  inp.value = val;
+  inp.addEventListener("input", syncHmRows);
+  row.querySelector(".acct-del").onclick = () => {
+    row.remove();
+    if (!document.querySelector("#hmRows .hm-id")) addHmRow();
+    syncHmRows();
+  };
+  $("hmRows").appendChild(row);
+  return row;
+}
+function renderHmRows(){
+  $("hmRows").innerHTML = "";
+  const ids = ($("HERMESA_BOT_ID").value || "").split(/[\n,]+/).map((x) => x.trim()).filter(Boolean);
+  if (!ids.length) addHmRow();
+  else ids.forEach((v) => addHmRow(v));
+  hmCount();
+}
+$("hmAdd").onclick = () => { addHmRow().querySelector(".hm-id").focus(); };
+renderHmRows();
+
+/* ---------- Telegram group IDs UI (multi) ---------- */
+function tgGCount(){
+  const k = countKeys($("TELEGRAM_GROUP_IDS").value);
+  $("tgGN").textContent = k ? k + " group" + (k > 1 ? "s" : "") : "";
+}
+function syncTgRows(){
+  const ids = [];
+  document.querySelectorAll("#tgRows .tg-gid").forEach((i) => { const v = i.value.trim(); if (v) ids.push(v); });
+  $("TELEGRAM_GROUP_IDS").value = ids.join(", ");
+  tgGCount();
+  markDirty();
+}
+function addTgRow(val = ""){
+  const row = document.createElement("div");
+  row.className = "acct-row";
+  row.innerHTML =
+    '<input class="tg-gid" type="text" autocomplete="off" spellcheck="false" placeholder="-1001234567890">' +
+    '<button type="button" class="icobtn acct-del" title="Remove this group" aria-label="Remove this group">&#215;</button>';
+  const inp = row.querySelector(".tg-gid");
+  inp.value = val;
+  inp.addEventListener("input", syncTgRows);
+  row.querySelector(".acct-del").onclick = () => {
+    row.remove();
+    if (!document.querySelector("#tgRows .tg-gid")) addTgRow();
+    syncTgRows();
+  };
+  $("tgRows").appendChild(row);
+  return row;
+}
+function renderTgRows(){
+  $("tgRows").innerHTML = "";
+  const ids = ($("TELEGRAM_GROUP_IDS").value || "").split(/[\n,]+/).map((x) => x.trim()).filter(Boolean);
+  if (!ids.length) addTgRow();
+  else ids.forEach((v) => addTgRow(v));
+  tgGCount();
+}
+$("tgAdd").onclick = () => { addTgRow().querySelector(".tg-gid").focus(); };
+renderTgRows();
+
+/* ---------- Facebook tokens UI (multi token, own page-ID list per token) ---------- */
+function fbParse(){
+  const toks = ($("FACEBOOK_PAGE_TOKEN").value || "").split("\n");
+  const ids = ($("FACEBOOK_PAGE_ID").value || "").split("\n");
+  const out = [];
+  const n = Math.max(toks.length, ids.length);
+  for (let i = 0; i < n; i++){
+    const t = (toks[i] || "").trim();
+    const g = (ids[i] || "").split(",").map((x) => x.trim()).filter(Boolean);
+    if (t || g.length) out.push({ tok: t, ids: g });
+  }
+  return out;
+}
+function fbCount(){
+  const k = fbParse().length;
+  $("fbN").textContent = k ? k + " token" + (k > 1 ? "s" : "") : "";
+}
+function renumberFb(){
+  document.querySelectorAll("#fbCards .fbcard .fb-n").forEach((el, i) => { el.textContent = String(i + 1); });
+}
+function syncFb(){
+  const toks = [], ids = [];
+  document.querySelectorAll("#fbCards .fbcard").forEach((c) => {
+    const t = c.querySelector(".fb-tok").value.trim();
+    const g = [];
+    c.querySelectorAll(".fb-id").forEach((i) => { const v = i.value.trim(); if (v) g.push(v); });
+    if (!t && !g.length) return;
+    toks.push(t);
+    ids.push(g.join(", "));
+  });
+  $("FACEBOOK_PAGE_TOKEN").value = toks.join("\n");
+  $("FACEBOOK_PAGE_ID").value = ids.join("\n");
+  fbCount();
+  markDirty();
+}
+function addFbIdRow(card, val = ""){
+  const row = document.createElement("div");
+  row.className = "fb-idrow";
+  row.innerHTML =
+    '<input class="fb-id" type="text" inputmode="numeric" autocomplete="off" placeholder="numeric page ID, e.g. 1234567890">' +
+    '<button type="button" class="icobtn acct-add fb-idadd" title="Add another page ID under this token" aria-label="Add another page ID">+</button>' +
+    '<button type="button" class="icobtn acct-del fb-iddel" title="Remove this page ID" aria-label="Remove this page ID">&#215;</button>';
+  const inp = row.querySelector(".fb-id");
+  inp.value = val;
+  inp.addEventListener("input", syncFb);
+  row.querySelector(".fb-idadd").onclick = () => { addFbIdRow(card).querySelector(".fb-id").focus(); };
+  row.querySelector(".fb-iddel").onclick = () => {
+    row.remove();
+    if (!card.querySelector(".fb-id")) addFbIdRow(card);
+    syncFb();
+  };
+  card.querySelector(".fb-ids").appendChild(row);
+  return row;
+}
+function addFbCard(tok = "", ids = []){
+  const card = document.createElement("div");
+  card.className = "fbcard";
+  card.innerHTML =
+    '<div class="fbcard-head"><b>Token <span class="fb-n"></span></b>' +
+    '<button type="button" class="icobtn fb-del" title="Remove this token (and its page IDs)" aria-label="Remove this token">&#215;</button></div>' +
+    '<div class="fb-tokrow">' +
+    '<input class="fb-tok" type="password" autocomplete="off" placeholder="EAAG… page / user access token">' +
+    '<button type="button" class="icobtn fb-eye" title="Show / hide" aria-label="Show or hide token"><svg><use href="#i-eye"/></svg></button>' +
+    '</div>' +
+    '<div class="fb-ids-lab">Page IDs under this token &mdash; leave empty to auto-detect every page it can manage; first = default. Use <b>+</b> to add more.</div>' +
+    '<div class="fb-ids"></div>';
+  const tokEl = card.querySelector(".fb-tok");
+  tokEl.value = tok;
+  tokEl.addEventListener("input", syncFb);
+  card.querySelector(".fb-eye").onclick = () => { tokEl.type = tokEl.type === "password" ? "text" : "password"; };
+  card.querySelector(".fb-del").onclick = () => {
+    card.remove();
+    if (!document.querySelector("#fbCards .fbcard")) addFbCard();
+    renumberFb();
+    syncFb();
+  };
+  $("fbCards").appendChild(card);
+  if (ids.length) ids.forEach((v) => addFbIdRow(card, v));
+  else addFbIdRow(card);
+  renumberFb();
+  return card;
+}
+function renderFbCards(){
+  $("fbCards").innerHTML = "";
+  const cards = fbParse();
+  if (!cards.length) addFbCard();
+  else cards.forEach((c) => addFbCard(c.tok, c.ids));
+  fbCount();
+}
+$("fbAdd").onclick = () => { addFbCard().querySelector(".fb-tok").focus(); };
+renderFbCards();
+
+/* ---------- Zedge accounts UI (per-account cards, max 3 instances) ---------- */
+const ZMAX = 3;
+const zLines = (t) => (t || "").split("\n");
+function zPair(line){
+  const t = (line || "").trim();
+  if (!t) return { a: "", b: "" };
+  const i = t.indexOf(":");
+  return i < 0 ? { a: t.trim(), b: "" }
+               : { a: t.slice(0, i).trim(), b: t.slice(i + 1).trim() };
+}
+function renumberZedge(){
+  const cards = [...document.querySelectorAll("#zedgeCards .zcard")];
+  cards.forEach((c, i) => { c.querySelector(".zt").textContent = "Zedge account " + (i + 1); });
+  $("zdN").textContent = cards.length;
+  $("zedgeAdd").disabled = cards.length >= ZMAX;
+}
+function syncZedge(){
+  const cards = [...document.querySelectorAll("#zedgeCards .zcard")];
+  const acc = [], prx = [], auth = [], ov = ["", "", ""], dbs = ["", "", ""];
+  cards.forEach((c, idx) => {
+    const email = c.querySelector(".z-em").value.trim();
+    const pw    = c.querySelector(".z-pw").value.trim();
+    const pxs   = c.querySelector(".z-proxy").value.trim();
+    const pxu   = c.querySelector(".z-pxu").value.trim();
+    const pxp   = c.querySelector(".z-pxp").value.trim();
+    const proxy = pxs ? ((pxu || pxp) ? pxs + "|" + pxu + "|" + pxp : pxs) : "";
+    const ovpn  = c.querySelector(".z-ovpn").value.trim();
+    const db    = c.querySelector(".z-db").value.trim();
+    acc.push((email || pw) ? (email + " : " + pw) : "");
+    prx.push(proxy);
+    if (idx < 3){ ov[idx] = ovpn; dbs[idx] = db; }
+  });
+  $("ZEDGE_ACCOUNTS").value  = acc.join("\n").replace(/\n+$/, "");
+  $("ZEDGE_PROXIES").value   = prx.join("\n").replace(/\n+$/, "");
+  $("ZEDGE_WG_1").value = ov[0];
+  $("ZEDGE_WG_2").value = ov[1];
+  $("ZEDGE_WG_3").value = ov[2];
+  $("ZEDGE_DB_URL_1").value = dbs[0];
+  $("ZEDGE_DB_URL_2").value = dbs[1];
+  $("ZEDGE_DB_URL_3").value = dbs[2];
+  renumberZedge();
+  markDirty();
+}
+function addZedgeCard(d){
+  d = d || {};
+  if (document.querySelectorAll("#zedgeCards .zcard").length >= ZMAX) return null;
+  const card = document.createElement("div");
+  card.className = "zcard";
+  card.innerHTML =
+    '<div class="zcard-head"><span class="zt"></span>' +
+      '<button type="button" class="icobtn z-del" title="Remove this account" aria-label="Remove this account">&#215;</button></div>' +
+    '<div class="fld"><label>Zedge email</label>' +
+      '<input class="z-em" type="email" autocomplete="off" spellcheck="false" placeholder="you@mail.com"></div>' +
+    '<div class="fld"><label>Zedge password</label><div class="inrow">' +
+      '<input class="z-pw" type="password" autocomplete="off" placeholder="account password">' +
+      '<button type="button" class="icobtn z-eye" title="Show / hide" aria-label="Show or hide password"><svg><use href="#i-eye"/></svg></button></div></div>' +
+    '<div class="fld"><label>Database URL for this account <span style="color:var(--dim)">(empty = built-in default)</span></label>' +
+      '<input class="z-db" type="text" autocomplete="off" spellcheck="false" placeholder="https://&hellip;.firebasedatabase.app"></div>' +
+    '<div class="fld"><label>Proxy for this account <span style="color:var(--dim)">(recommended &mdash; own IP per account)</span></label>' +
+      '<input class="z-proxy" type="text" autocomplete="off" spellcheck="false" placeholder="host:port   or   http://host:port"></div>' +
+    '<div class="fld"><label>Proxy login <span style="color:var(--dim)">(only if the proxy needs a username / password)</span></label><div class="inrow">' +
+      '<input class="z-pxu" type="text" autocomplete="off" spellcheck="false" placeholder="proxy username">' +
+      '<input class="z-pxp" type="password" autocomplete="off" placeholder="proxy password">' +
+      '<button type="button" class="icobtn z-pxeye" title="Show / hide" aria-label="Show or hide proxy password"><svg><use href="#i-eye"/></svg></button></div></div>' +
+    '<details class="zadv"><summary>Browser-only VPN (WireGuard) &mdash; optional, overrides the proxy</summary>' +
+      '<div class="fld"><label>WireGuard config &mdash; paste the full .conf file</label>' +
+        '<textarea class="z-ovpn" rows="4" spellcheck="false" placeholder="[Interface]&#10;PrivateKey = &hellip;&#10;Address = &hellip;&#10;[Peer]&#10;PublicKey = &hellip;&#10;Endpoint = &hellip;"></textarea></div>' +
+    '</details>';
+  card.querySelector(".z-em").value = d.email || "";
+  card.querySelector(".z-pw").value = d.pw || "";
+  card.querySelector(".z-proxy").value = d.proxy || "";
+  card.querySelector(".z-pxu").value = d.pxu || "";
+  card.querySelector(".z-pxp").value = d.pxp || "";
+  card.querySelector(".z-ovpn").value = d.ovpn || "";
+  card.querySelector(".z-db").value = d.db || "";
+  if (d.ovpn) card.querySelector(".zadv").open = true;
+  card.querySelectorAll("input,textarea").forEach((el) => el.addEventListener("input", syncZedge));
+  card.querySelector(".z-eye").onclick = () => {
+    const p = card.querySelector(".z-pw");
+    p.type = p.type === "password" ? "text" : "password";
+  };
+  card.querySelector(".z-pxeye").onclick = () => {
+    const p = card.querySelector(".z-pxp");
+    p.type = p.type === "password" ? "text" : "password";
+  };
+  card.querySelector(".z-del").onclick = () => {
+    card.remove();
+    if (!document.querySelector("#zedgeCards .zcard")) addZedgeCard();
+    syncZedge();
+  };
+  $("zedgeCards").appendChild(card);
+  renumberZedge();
+  return card;
+}
+function zProxyParse(ln){
+  ln = (ln || "").trim();
+  if (!ln || ln === "-") return { s: ln, u: "", p: "" };
+  if (ln.indexOf("|") >= 0){
+    const parts = ln.split("|").map((x) => x.trim());
+    return { s: parts[0] || "", u: parts[1] || "", p: parts[2] || "" };
+  }
+  if (ln.indexOf("@") >= 0 && ln.indexOf("://") >= 0){
+    try {
+      const u = new URL(ln);
+      const s = u.protocol + "//" + u.hostname + (u.port ? ":" + u.port : "");
+      return { s: s, u: decodeURIComponent(u.username || ""), p: decodeURIComponent(u.password || "") };
+    } catch (e) {}
+  }
+  return { s: ln, u: "", p: "" };
+}
+function renderZedgeCards(){
+  $("zedgeCards").innerHTML = "";
+  const acc = zLines($("ZEDGE_ACCOUNTS").value);
+  const prx = zLines($("ZEDGE_PROXIES").value);
+  const ov = [$("ZEDGE_WG_1").value, $("ZEDGE_WG_2").value, $("ZEDGE_WG_3").value];
+  const dbs = [$("ZEDGE_DB_URL_1").value, $("ZEDGE_DB_URL_2").value, $("ZEDGE_DB_URL_3").value];
+  let count = 0;
+  const bump = (arr) => arr.forEach((l, i) => { if ((l || "").trim()) count = Math.max(count, i + 1); });
+  bump(acc); bump(prx); bump(ov); bump(dbs);
+  count = Math.min(Math.max(count, 1), ZMAX);
+  for (let i = 0; i < count; i++){
+    const a = zPair(acc[i] || "");
+    const px = zProxyParse(prx[i] || "");
+    addZedgeCard({ email: a.a, pw: a.b, proxy: px.s, pxu: px.u, pxp: px.p, ovpn: (ov[i] || "").trim(), db: (dbs[i] || "").trim() });
+  }
+  renumberZedge();
+}
+$("zedgeAdd").onclick = () => {
+  const c = addZedgeCard();
+  if (c){ c.querySelector(".z-em").focus(); syncZedge(); }
+};
+renderZedgeCards();
+
+/* ---------- live run ---------- */
+let lastRt = null;
+function renderRuntime(rt){
+  lastRt = rt || null;
+  renderConnTest(rt && rt.conntest);
+  renderDash();
+  const state = $("runState"), meta = $("runMeta"), grid = $("runLinks");
+  grid.innerHTML = "";
+  if (!rt){
+    state.textContent = "no data"; state.className = "tag tag-opt";
+    meta.textContent = "Waiting for the first run to report in…";
+    return;
+  }
+  const fresh = rt.heartbeat && Date.now() - Number(rt.heartbeat) < 300000;
+  state.textContent = fresh ? "online" : "offline";
+  state.className = fresh ? "tag tag-ok" : "tag tag-opt";
+  const started = rt.startedAt ? new Date(rt.startedAt).toLocaleString() : "—";
+  const hb = rt.heartbeat ? new Date(Number(rt.heartbeat)).toLocaleTimeString() : "—";
+  meta.textContent = "started " + started + "  ·  heartbeat " + hb +
+    "  ·  links via Cloudflare quick tunnel (new every run)";
+  const links = [
+    ["Hermes WebUI", rt.webuiUrl],
+    ["Dashboard", rt.dashboardUrl],
+    ["Live desktop", rt.liveUrl],
+    ["Camofox browser", rt.browserUrl],
+  ];
+  for (const [label, url] of links){
+    const d = document.createElement("div");
+    d.className = "runcard";
+    const h = document.createElement("h4");
+    h.textContent = label;
+    d.appendChild(h);
+    if (url){
+      const a = document.createElement("a");
+      a.href = url; a.target = "_blank"; a.rel = "noopener";
+      a.innerHTML = 'Open <svg width="11" height="11"><use href="#i-ext"/></svg>';
+      d.appendChild(a);
+    } else {
+      const s = document.createElement("span");
+      s.className = "na";
+      s.textContent = "Not available";
+      d.appendChild(s);
+    }
+    grid.appendChild(d);
+  }
+}
+
+/* ---------- VPN / proxy connection test (real test runs on a runner) ---------- */
+// Browsers cannot dial VPN/proxy sockets, so the panel just DISPATCHES a
+// GitHub workflow (connection-test.yml). The runner performs the real test
+// and publishes to runtime/<uid>/conntest, which renderRuntime streams here.
+function connTestRepo(){
+  return (reposState || []).find((r) => r.token && r.owner && r.name) || null;
+}
+async function dispatchConnTest(){
+  const out = $("connTestOut");
+  const repo = connTestRepo();
+  if (!repo){
+    toast("Add a repository (owner + name + token) on the Deploy page first", false);
+    if (out) out.textContent = "No repository configured - add one on the Deploy page (owner, name, token), push the repo, then retry.";
+    return;
+  }
+  const btn = $("connTestBtn"), B = repo.branch || "main";
+  if (btn) btn.disabled = true;
+  try {
+    await ghFetch(repo.token, "POST",
+      "/repos/" + repo.owner + "/" + repo.name +
+      "/actions/workflows/connection-test.yml/dispatches", { ref: B });
+    if (out) out.textContent = "\u23f3 Test dispatched to " + repo.owner + "/" + repo.name +
+      " (" + B + ") - waiting for the runner to report (usually 1-3 min)...";
+    toast("Connection test started - results will appear below");
+  } catch (e) {
+    const msg = /HTTP 404/.test(e.message)
+      ? "connection-test.yml not found on " + B + " - push the updated repo first (HTTP 404)"
+      : e.message;
+    if (out) out.textContent = "Dispatch failed: " + msg;
+    toast("Dispatch failed: " + msg, false);
+  } finally {
+    setTimeout(() => { if (btn) btn.disabled = false; }, 4000);
+  }
+}
+function renderConnTest(ct){
+  const out = $("connTestOut");
+  if (!out || !ct) return;
+  if (typeof ct === "string"){
+    try { ct = JSON.parse(ct); } catch { out.textContent = ct; return; }
+  }
+  const L = [];
+  const when = ct.finishedAt || ct.startedAt;
+  L.push((ct.status === "done" ? "Test complete" : "Testing...") +
+    (when ? "  \u00b7  " + new Date(Number(when)).toLocaleTimeString() : ""));
+  if (ct.runnerIp) L.push("Runner IP (no VPN): " + ct.runnerIp);
+  (ct.proxies || []).forEach((p) => {
+    L.push((p.ok ? "[OK]" : "[FAIL]") + " Proxy " + p.n + " (" + (p.server || "") + "): " +
+      (p.ok ? (p.exitIp + " \u00b7 " + p.ms + " ms" + (p.sameAsRunner ? " (warning: same as runner IP)" : ""))
+            : (p.error || "failed")));
+  });
+  (ct.vpns || []).forEach((v) => {
+    L.push((v.ok ? "[OK]" : "[FAIL]") + " VPN " + v.n + ": " +
+      (v.ok ? (v.exitIp + " \u00b7 " + v.ms + " ms" + (v.sameAsRunner ? " (warning: same as runner IP)" : ""))
+            : (v.error || "failed")));
+  });
+  if (ct.status === "done" && !(ct.proxies || []).length && !(ct.vpns || []).length)
+    L.push("No proxies or WireGuard configs found to test.");
+  out.textContent = L.join("\n");
+}
+if ($("connTestBtn")) $("connTestBtn").onclick = dispatchConnTest;
+
+/* ---------- model pool (full panel, in-page) ---------- */
+const HERMES = { uid: null, db: null };
+const NV_BASE = "https://integrate.api.nvidia.com/v1";
+const MS_BASE = "https://api.mistral.ai/v1";
+const PROXY_KEY = "hermes-cors-proxy";
+
+let catalog = [];        // [{id, provider}]
+let pool = [];           // [{id, provider}]
+let poolSavedJson = "[]";
+let showOnlySelected = false;
+const results = new Map();   // id -> {ok, ms, msg}
+
+$("proxyUrl").value = localStorage.getItem(PROXY_KEY) || "";
+$("proxyUrl").addEventListener("input", () => localStorage.setItem(PROXY_KEY, $("proxyUrl").value.trim()));
+
+const poolKey = (m) => m.provider + "::" + m.id;
+const inPool = (m) => pool.some((p) => p.id === m.id && p.provider === m.provider);
+const keysOf = (p) => ((p === "nvidia" ? $("NVIDIA_KEYS").value : $("MISTRAL_KEYS").value) || "")
+  .split(/[\n,]+/).map((x) => x.trim()).filter(Boolean);
+
+function proxied(url){
+  const p = ($("proxyUrl").value || "").trim();
+  if (!p) return url;
+  return p.includes("{url}") ? p.replace("{url}", encodeURIComponent(url)) : p + encodeURIComponent(url);
+}
+function setProg(pct){ $("mProg").style.width = Math.max(0, Math.min(100, pct)) + "%"; }
+
+/* the model list is written by hand — provider catalogs block browser calls */
+const modelsOf = (provider) =>
+  [...new Set((((provider === "nvidia" ? $("NV_MODELS").value : $("MS_MODELS").value) || "")
+    .split(/[\n,]+/).map((x) => x.trim()).filter(Boolean)))];
+
+function setModels(provider, ids){
+  $(provider === "nvidia" ? "NV_MODELS" : "MS_MODELS").value = ids.join("\n");
+}
+function removeModel(m){
+  setModels(m.provider, modelsOf(m.provider).filter((id) => id !== m.id));
+  results.delete(poolKey(m));
+  rebuildCatalog();
+  markDirty();                      // shows the Save bar
+  toast("Removed " + m.id + " — press Apply pool to save", true);
+}
+
+function rebuildCatalog(){
+  catalog = [];
+  for (const provider of ["nvidia", "mistral"])
+    for (const id of modelsOf(provider)) catalog.push({ id, provider });
+  // drop pool entries whose model was removed from the list
+  pool = pool.filter((p) => catalog.some((m) => m.id === p.id && m.provider === p.provider));
+  renderList();
+}
+
+async function testModel(id, provider){
+  const key = keysOf(provider)[0];
+  if (!key) return { ok:false, ms:0, msg:"no " + provider + " keys" };
+  const base = provider === "nvidia" ? NV_BASE : MS_BASE;
+  const t0 = performance.now();
+  try {
+    const r = await fetch(proxied(base + "/chat/completions"), {
+      method: "POST",
+      headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
+      body: JSON.stringify({ model:id, max_tokens:5, messages:[{ role:"user", content:"Say OK" }] }),
+    });
+    const ms = Math.round(performance.now() - t0);
+    if (r.ok){ await r.json().catch(() => ({})); return { ok:true, ms, msg:"works" }; }
+    let msg = "HTTP " + r.status;
+    try { const e = await r.json(); msg = (e.error && e.error.message) || e.message || e.title || msg; } catch(_){}
+    return { ok:false, ms, msg:String(msg).slice(0, 160) };
+  } catch (e){
+    return { ok:false, ms:Math.round(performance.now() - t0),
+             msg:(e.message || "network error") + " — blocked? add a CORS proxy" };
+  }
+}
+
+function filtered(){
+  const q = ($("mFilter").value || "").trim().toLowerCase();
+  return catalog.filter((m) =>
+    (!q || m.id.toLowerCase().includes(q) || m.provider.includes(q)) &&
+    (!showOnlySelected || inPool(m)));
+}
+function renderStats(){
+  $("pNvKeys").textContent = keysOf("nvidia").length;
+  $("pMsKeys").textContent = keysOf("mistral").length;
+  $("pCat").textContent = catalog.length;
+  $("pSel").textContent = pool.length;
+  $("nvMn").textContent = modelsOf("nvidia").length;
+  $("msMn").textContent = modelsOf("mistral").length;
+  $("poolState").textContent = catalog.length + " model" + (catalog.length === 1 ? "" : "s");
+  $("poolState").className = "tag " + (catalog.length ? "tag-ok" : "tag-opt");
+}
+function renderPoolMeta(){
+  const chips = $("poolChips");
+  chips.innerHTML = "";
+  for (const m of pool){
+    const s = document.createElement("span");
+    s.className = "chip";
+    s.textContent = m.id;
+    chips.appendChild(s);
+  }
+  const dirty = JSON.stringify(pool) !== poolSavedJson;
+  $("poolMeta").textContent = pool.length
+    ? pool.length + " model" + (pool.length > 1 ? "s" : "") + " selected" +
+      (dirty ? " · unsaved — press Apply pool" : " · saved to the vault")
+    : "No pool saved yet.";
+  renderStats();
+  renderDash();
+}
+function renderList(){
+  const list = $("mList"), rows = filtered();
+  list.innerHTML = "";
+  if (!catalog.length){
+    list.innerHTML = '<div class="mempty">Add model IDs above to build your list.</div>';
+    renderPoolMeta(); return;
+  }
+  if (!rows.length){
+    list.innerHTML = '<div class="mempty">No models match</div>';
+    renderPoolMeta(); return;
+  }
+  for (const m of rows){
+    const row = document.createElement("div");
+    row.className = "mrow";
+
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = inPool(m);
+    cb.onchange = () => {
+      if (cb.checked){ if (!inPool(m)) pool.push({ id:m.id, provider:m.provider }); }
+      else pool = pool.filter((p) => !(p.id === m.id && p.provider === m.provider));
+      renderPoolMeta();
+    };
+
+    const name = document.createElement("span");
+    name.className = "mid"; name.textContent = m.id;
+
+    const prov = document.createElement("span");
+    prov.className = "prov"; prov.textContent = m.provider;
+
+    const res = document.createElement("span");
+    res.className = "res";
+    const prev = results.get(poolKey(m));
+    if (prev){
+      res.classList.add(prev.ok ? "ok" : "bad");
+      res.textContent = prev.ok ? "✓ " + prev.ms + " ms" : "✕ " + prev.msg;
+      res.title = prev.msg;
+    }
+
+    const btn = document.createElement("button");
+    btn.className = "tbtn"; btn.textContent = "Test";
+    btn.onclick = async () => {
+      btn.disabled = true; res.className = "res"; res.textContent = "testing…";
+      const r = await testModel(m.id, m.provider);
+      results.set(poolKey(m), r);
+      res.className = "res " + (r.ok ? "ok" : "bad");
+      res.textContent = r.ok ? "✓ " + r.ms + " ms" : "✕ " + r.msg;
+      res.title = r.msg;
+      btn.disabled = false;
+    };
+
+    const del = document.createElement("button");
+    del.className = "dbtn"; del.textContent = "✕";
+    del.title = "Remove " + m.id + " from the list";
+    del.onclick = () => removeModel(m);
+
+    row.append(cb, name, prov, res, btn, del);
+    list.appendChild(row);
+  }
+  renderPoolMeta();
+}
+
+$("mFilter").addEventListener("input", renderList);
+for (const k of ["NV_MODELS", "MS_MODELS"]) $(k).addEventListener("input", rebuildCatalog);
+$("mSelAll").onclick = () => {
+  for (const m of filtered()) if (!inPool(m)) pool.push({ id:m.id, provider:m.provider });
+  renderList();
+};
+$("mClear").onclick = () => { pool = []; renderList(); };
+$("mOnly").onclick = () => {
+  showOnlySelected = !showOnlySelected;
+  $("mOnly").textContent = showOnlySelected ? "Show all" : "Show selected";
+  renderList();
+};
+$("mTestSel").onclick = async () => {
+  const items = pool.slice();
+  if (!items.length) return toast("Select at least 1 model", false);
+  const btn = $("mTestSel");
+  btn.disabled = true;
+  let done = 0, ok = 0;
+  toast("Testing " + items.length + " model(s)…");
+  for (const m of items){
+    const r = await testModel(m.id, m.provider);
+    results.set(poolKey(m), r);
+    if (r.ok) ok++;
+    done++;
+    setProg(Math.round((done / items.length) * 100));
+    renderList();
+    await new Promise((res) => setTimeout(res, 1100)); // free tier: 1 req/sec
+  }
+  btn.disabled = false;
+  toast(ok + "/" + items.length + " model(s) working", ok > 0);
+  setTimeout(() => setProg(0), 1200);
+};
+$("mApply").onclick = async () => {
+  if (!HERMES.uid || !HERMES.db) return toast("Sign in first", false);
+  const { rtdb, ref, update } = HERMES.db;
+  const btn = $("mApply");
+  btn.disabled = true;
+  const nv = modelsOf("nvidia").join("\n"), ms = modelsOf("mistral").join("\n");
+  try {
+    // saves the typed lists AND the ticked pool in one write
+    await update(ref(rtdb, "secrets/" + HERMES.uid), {
+      NV_MODELS: nv,
+      MS_MODELS: ms,
+      MODEL_POOL: JSON.stringify(pool),
+      MODEL_POOL_UPDATED: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    poolSavedJson = JSON.stringify(pool);
+    saved.NV_MODELS = nv; saved.MS_MODELS = ms;   // keep dirty tracking in sync
+    renderPoolMeta();
+    markDirty();
+    toast(pool.length
+      ? "Saved — model list + " + pool.length + " model(s) in the rotating pool"
+      : "Model list saved — tick at least 1 model to fill the pool", !!pool.length);
+  } catch (e){
+    toast("Save failed: " + e.message, false);
+  }
+  btn.disabled = false;
+};
+function loadPoolFromVault(v){
+  let saved = [];
+  try { saved = JSON.parse(v.MODEL_POOL || "[]"); } catch(_){ saved = []; }
+  if (!Array.isArray(saved)) saved = [];
+  saved = saved.filter((x) => x && x.id && (x.provider === "nvidia" || x.provider === "mistral"));
+  const incoming = JSON.stringify(saved);
+  if (JSON.stringify(pool) === poolSavedJson){ pool = saved; }  // no local edits pending
+  poolSavedJson = incoming;
+
+  // legacy vaults kept the lists under other names — migrate them once
+  const listOf = (p) => saved.filter((x) => x.provider === p).map((x) => x.id).join("\n");
+  if (!$("NV_MODELS").value.trim()){ $("NV_MODELS").value = v.MODEL_LIST_NVIDIA || listOf("nvidia"); }
+  if (!$("MS_MODELS").value.trim()){ $("MS_MODELS").value = v.MODEL_LIST_MISTRAL || listOf("mistral"); }
+  rebuildCatalog();
+  markDirty();
+}
+for (const k of ["NVIDIA_KEYS", "MISTRAL_KEYS"]) $(k).addEventListener("input", renderStats);
+renderStats();
+
+/* ---------- dashboard ---------- */
+function setNode(id, state, sub){
+  const n = document.querySelector('[data-node="' + id + '"]');
+  if (!n) return;
+  n.dataset.state = state;
+  const s = n.querySelector(".fsub");
+  if (s && sub != null) s.textContent = sub;
+}
+function renderDash(){
+  const g = (k) => { const el = $(k); return ((el && el.value) || "").trim(); };
+  const nvK = countKeys(g("NVIDIA_KEYS")), msK = countKeys(g("MISTRAL_KEYS"));
+  const emails = countKeys(g("GMAIL_ACCOUNTS"));
+  const nonEmpty = (t) => t.split("\n").map((x) => x.trim()).filter(Boolean);
+  const zAcc = nonEmpty(g("ZEDGE_ACCOUNTS")).length;
+  const zPrx = nonEmpty(g("ZEDGE_PROXIES")).filter((x) => x !== "-").length;
+  const zVpn = [g("ZEDGE_WG_1"), g("ZEDGE_WG_2"), g("ZEDGE_WG_3")].filter(Boolean).length;
+  const tg = !!(g("TELEGRAM_BOT_TOKEN") && g("TELEGRAM_USER_ID"));
+  const fb = !!g("FACEBOOK_PAGE_TOKEN");
+  const sl = !!(g("SLACK_BOT_TOKEN") && g("SLACK_APP_TOKEN"));
+  const hm = !!g("HERMESA_BOT_ID");
+  const st = !!(g("DATA_REPO") && g("DATA_REPO_TOKEN"));
+  const sa = !!g("STABLE_AUDIO_TOKEN");
+  const pt = g("PANEL_TOKEN").length >= 8;
+  const fresh = !!(lastRt && lastRt.heartbeat && Date.now() - Number(lastRt.heartbeat) < 300000);
+
+  setNode("vault", pt ? "ok" : "warn", pt ? "Token set \u00b7 vault synced" : "PANEL_TOKEN missing");
+  setNode("agent", fresh ? "ok" : "off", fresh ? "Online \u00b7 heartbeat live" : "Offline \u00b7 starts with the workflow");
+  setNode("tg", tg ? "ok" : "warn", tg ? "Bot connected" : "Required \u00b7 not set");
+  setNode("sl", sl ? "ok" : "off", sl ? "Workspace linked" : "Optional \u00b7 not set");
+  setNode("em", emails ? "ok" : "off", emails ? emails + " account" + (emails > 1 ? "s" : "") : "Optional \u00b7 not set");
+  const fbT = nonEmpty(g("FACEBOOK_PAGE_TOKEN")).length;
+  const fbP = nonEmpty(g("FACEBOOK_PAGE_ID")).join(",").split(",").map((x) => x.trim()).filter(Boolean).length;
+  const hmB = countKeys(g("HERMESA_BOT_ID"));
+  setNode("fb", fb ? "ok" : "off", fb ? fbT + " token" + (fbT > 1 ? "s" : "") + " \u00b7 " + (fbP ? fbP + " page ID" + (fbP > 1 ? "s" : "") : "auto-detect pages") : "Optional \u00b7 not set");
+  setNode("hm", hm ? "ok" : "off", hm ? hmB + " bot" + (hmB > 1 ? "s" : "") + " \u00b7 push ready" : "Optional \u00b7 not set");
+  setNode("keys", (nvK + msK) ? "ok" : "warn", nvK + " NVIDIA \u00b7 " + msK + " Mistral");
+  setNode("pool", pool.length ? "ok" : "warn", pool.length ? pool.length + " models rotating" : "No models selected");
+  setNode("ol", "ok", g("OLLAMA_MODEL") || "default model");
+  setNode("zg", zAcc ? "ok" : "off", zAcc ? zAcc + " acct \u00b7 " + zPrx + " proxy \u00b7 " + zVpn + " VPN" : "Optional \u00b7 not set");
+  setNode("sa", "ok", sa ? "Own token" : "Auto stealth mode");
+  setNode("stor", st ? "ok" : "off", st ? g("DATA_REPO") : "Optional \u00b7 not set");
+  setNode("live", fresh ? "ok" : "off", fresh ? "Tunnels active \u00b7 fresh links each run" : "Links appear when a run starts");
+
+  const ifaceOn = [tg, sl, !!emails, fb, hm].filter(Boolean).length;
+  $("dAgent").textContent = fresh ? "Online" : "Offline";
+  $("dAgent").className = "v " + (fresh ? "c-ok" : "c-dim");
+  $("dIf").textContent = ifaceOn + " / 5";
+  $("dPool").textContent = String(pool.length);
+  $("dZg").textContent = String(zAcc);
+  const req = [pt, tg, (nvK + msK) > 0, pool.length > 0];
+  const done = req.filter(Boolean).length;
+  $("dReq").textContent = done + " / " + req.length;
+  $("dReqBar").style.width = ((done / req.length) * 100) + "%";
+
+  const wrap = $("dLinks");
+  wrap.innerHTML = "";
+  const links = [
+    ["Hermes WebUI", lastRt && lastRt.webuiUrl],
+    ["Dashboard", lastRt && lastRt.dashboardUrl],
+    ["Live desktop", lastRt && lastRt.liveUrl],
+    ["Camofox browser", lastRt && lastRt.browserUrl],
+  ];
+  for (const [label, url] of links){
+    const el = document.createElement(url ? "a" : "span");
+    el.className = "lchip" + (url ? "" : " na");
+    if (url){ el.href = url; el.target = "_blank"; el.rel = "noopener"; }
+    el.textContent = label;
+    wrap.appendChild(el);
+  }
+}
+renderDash();
+
+/* ---------- custom dropdowns ---------- */
+const DD_CARET = '<svg class="dd-caret" viewBox="0 0 16 16" fill="none"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const DD_CHECK = '<svg class="dd-check" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const DD_SYNCS = [];
+function ddSplit(t){
+  const i = t.indexOf(" \u2014 ");   // "title \u2014 description"
+  return i > -1 ? [t.slice(0, i), t.slice(i + 3)] : [t, ""];
+}
+for (const sel of document.querySelectorAll("select")) {
+  const dd = document.createElement("div");
+  dd.className = "dd";
+  sel.parentNode.insertBefore(dd, sel);
+  dd.appendChild(sel);
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "dd-btn";
+  btn.setAttribute("aria-haspopup", "listbox");
+  const menu = document.createElement("div");
+  menu.className = "dd-menu";
+  menu.setAttribute("role", "listbox");
+  dd.append(btn, menu);
+  const sync = () => {
+    const opt = sel.options[sel.selectedIndex >= 0 ? sel.selectedIndex : 0];
+    const [t, d] = ddSplit(opt ? opt.textContent : "");
+    btn.innerHTML = '<span class="dd-val"><b></b><span></span></span>' + DD_CARET;
+    btn.querySelector("b").textContent = t;
+    btn.querySelector(".dd-val>span").textContent = d ? " \u2014 " + d : "";
+    for (const o of menu.children) o.setAttribute("aria-selected", o.dataset.v === sel.value ? "true" : "false");
+  };
+  for (const opt of sel.options) {
+    const [t, d] = ddSplit(opt.textContent);
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "dd-opt";
+    b.dataset.v = opt.value;
+    b.setAttribute("role", "option");
+    b.innerHTML = DD_CHECK + '<span style="flex:1;min-width:0"><span class="dd-ot"></span><span class="dd-od"></span></span>';
+    b.querySelector(".dd-ot").textContent = t;
+    if (d) b.querySelector(".dd-od").textContent = d;
+    else b.querySelector(".dd-od").remove();
+    b.onclick = () => {
+      dd.classList.remove("open");
+      if (sel.value !== opt.value) {
+        sel.value = opt.value;
+        sel.dispatchEvent(new Event("input"));  // feeds the dirty tracker
+      }
+      sync();
+      btn.focus();
+    };
+    menu.appendChild(b);
+  }
+  btn.onclick = () => {
+    const open = !dd.classList.contains("open");
+    for (const x of document.querySelectorAll(".dd.open")) x.classList.remove("open");
+    dd.classList.toggle("open", open);
+  };
+  DD_SYNCS.push(sync);
+  sync();
+}
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".dd")) for (const x of document.querySelectorAll(".dd.open")) x.classList.remove("open");
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") for (const x of document.querySelectorAll(".dd.open")) x.classList.remove("open");
+});
+function refreshDropdowns(){ for (const f of DD_SYNCS) f(); }
+
+/* ---------- firebase ---------- */
+async function boot(){
+  if (String(firebaseConfig.apiKey).startsWith("YOUR_")){
+    setConn("err", "Not configured");
+    $("lmsg").textContent = "Fill in firebaseConfig at the bottom of this file first.";
+    return;
+  }
+  const { initializeApp } = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js");
+  const { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } =
+    await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js");
+  const { getDatabase, ref, set, update, onValue } =
+    await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js");
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const rtdb = getDatabase(app);
+  HERMES.db = { rtdb, ref, set, update, onValue };
+  let uid = null, unsub = [];
+
+  $("in").onclick = async () => {
+    $("lmsg").textContent = "";
+    $("in").disabled = true;
+    $("in").textContent = "Signing in…";
+    try {
+      await signInWithEmailAndPassword(auth, $("em").value.trim(), $("pw").value);
+    } catch (e) {
+      $("lmsg").textContent = "Sign-in failed: " + (e.code || e.message);
+    } finally {
+      $("in").disabled = false;
+      $("in").textContent = "Continue";
+    }
+  };
+  $("pw").addEventListener("keydown", (e) => { if (e.key === "Enter") $("in").click(); });
+  $("out").onclick = () => signOut(auth);
+
+  onAuthStateChanged(auth, (user) => {
+    unsub.forEach((fn) => fn()); unsub = [];
+    if (!user){
+      uid = null; HERMES.uid = null;
+      $("login").classList.remove("hidden");
+      $("app").classList.add("hidden");
+      $("savebar").classList.add("hidden");
+      $("who").textContent = "";
+      setConn("warn", "Signed out");
+      reposOnLogout();
+      return;
+    }
+    uid = user.uid; HERMES.uid = uid;
+    $("login").classList.add("hidden");
+    $("app").classList.remove("hidden");
+    $("who").textContent = user.email || "";
+    setConn("ok", "Connected");
+    unsub.push(onValue(ref(rtdb, "secrets/" + uid), (snap) => {
+      const v = snap.val() || {};
+      if (!dirtyKeys().length) fill(v);
+      loadPoolFromVault(v);
+      loadReposFromVault(v);
+    }, (e) => { setConn("err", "Rules error"); toast("Cannot read vault: " + e.message, false); }));
+    unsub.push(onValue(ref(rtdb, "runtime/" + uid), (snap) => renderRuntime(snap.val())));
+  });
+
+  $("save").onclick = async () => {
+    if (!uid) return;
+    const problems = validate();
+    if (problems.length) return toast(problems[0], false);
+    const data = snapshot();
+    data.MODEL_POOL = JSON.stringify(pool);          // keep the model pool intact
+    data.MODEL_POOL_UPDATED = new Date().toISOString();
+    data.REPOS = JSON.stringify(reposExport());      // keep repo deploy cards intact
+    data.updatedAt = new Date().toISOString();
+    $("save").disabled = true;
+    try {
+      await set(ref(rtdb, "secrets/" + uid), data);
+      saved = snapshot();
+      markDirty();
+      reposAutoSync();  // hands-free: sync secrets to auto-sync repos
+      toast("Saved — next run will use these values");
+    } catch (e) {
+      toast("Save failed: " + e.message, false);
+      markDirty();
+    }
+  };
+  $("reload").onclick = () => { fill(saved); toast("Changes discarded"); };
+}
+
+/* ==================== Repos: multi-repo push + Actions secrets ==================== */
+const BOOTSTRAP_SECRETS = ["FIREBASE_API_KEY", "FIREBASE_DB_URL", "FIREBASE_EMAIL", "FIREBASE_PASSWORD"];
+let reposState = [];
+const repoFiles = {}; // cardId -> FileList (runtime only, never persisted)
+
+function reposExport(){
+  return reposState.map((r) => ({ ...r, token: r.saveToken === false ? "" : (r.token || "") }));
+}
+function loadReposFromVault(v){
+  const incoming = (v && v.REPOS) ? v.REPOS : "[]";
+  if (incoming === JSON.stringify(reposExport())) return; // our own echo — keep focus
+  let list = [];
+  try { list = JSON.parse(incoming); } catch { list = []; }
+  if (!Array.isArray(list)) list = [];
+  const sessionTokens = {};
+  reposState.forEach((r) => { if (r.token) sessionTokens[r.id] = r.token; });
+  reposState = list.map((r) => ({ ...r, token: r.token || sessionTokens[r.id] || "" }));
+  renderRepos();
+}
+function reposOnLogout(){ reposState = []; renderRepos(); }
+async function reposPersist(quiet){
+  if (!HERMES.uid || !HERMES.db) return;
+  const { rtdb, ref, update } = HERMES.db;
+  try {
+    await update(ref(rtdb, "secrets/" + HERMES.uid), {
+      REPOS: JSON.stringify(reposExport()),
+      REPOS_UPDATED: new Date().toISOString(),
+    });
+    if (!quiet) toast("Repositories saved");
+  } catch (e){ toast("Repo save failed: " + e.message, false); }
+}
+let repoSaveTimer;
+function reposPersistSoon(){ clearTimeout(repoSaveTimer); repoSaveTimer = setTimeout(() => reposPersist(true), 900); }
+function newRepoCard(){
+  return {
+    id: "r" + Math.random().toString(36).slice(2, 9),
+    label: "New repository", owner: "", name: "", branch: "main", message: "",
+    token: "", saveToken: true, autoSync: true, secretSel: {},
+    extraSecrets: BOOTSTRAP_SECRETS.map((n) => ({ name: n, value: "" })),
+  };
+}
+
+/* --- GitHub REST (api.github.com supports browser CORS) --- */
+async function ghFetch(token, method, path, body){
+  // Flaky networks drop random requests to api.github.com ("Failed to
+  // fetch") even for tiny payloads. Retry EVERY call on network-level
+  // failures and transient 5xx/429, with growing backoff. Safe here:
+  // blobs/trees/commits are content-addressed, ref update is guarded
+  // by its caller.
+  let lastErr = null;
+  for (let attempt = 0; attempt <= 5; attempt++){
+    if (attempt) await new Promise((r) => setTimeout(r, 3000 * attempt));
+    let res;
+    try {
+      res = await fetch("https://api.github.com" + path, {
+        method,
+        cache: "no-store",
+        headers: {
+          "Authorization": "Bearer " + String(token || "").trim(),
+          "Accept": "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          ...(body ? { "Content-Type": "application/json" } : {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+    } catch (e) {
+      lastErr = e; // network-level failure - retry
+      console.warn("ghFetch network fail (try " + (attempt + 1) + "/6): " + method + " " + path, e);
+      continue;
+    }
+    const txt = await res.text();
+    let data = {};
+    try { data = txt ? JSON.parse(txt) : {}; } catch { data = { raw: txt }; }
+    if (!res.ok){
+      const err = new Error("HTTP " + res.status + (data && data.message ? " - " + data.message : ""));
+      if (res.status === 429 || res.status >= 500){ lastErr = err; continue; } // transient - retry
+      throw err; // real API error (auth/permission/validation) - no retry
+    }
+    return data;
+  }
+  throw lastErr || new Error("network error");
+}
+
+/* --- libsodium sealed box (loaded on demand, encrypts secrets in-browser) --- */
+let _sodium = null;
+async function loadSodium(){
+  if (_sodium) return _sodium;
+  const m = await import("https://esm.sh/libsodium-wrappers@0.7.15");
+  const s = m.default || m;
+  await s.ready;
+  _sodium = s;
+  return s;
+}
+
+function repoRelPath(f){
+  const wp = f.webkitRelativePath || f.name;
+  const parts = wp.split("/");
+  return parts.length > 1 ? parts.slice(1).join("/") : wp;
+}
+function repoSkipPath(p){
+  if (p.endsWith(".pyc") || p.endsWith("push_gui_config.json") || p.endsWith(".DS_Store")) return true;
+  const q = "/" + p;
+  return ["/.git/", "/__pycache__/", "/node_modules/", "/.venv/"].some((d) => q.includes(d));
+}
+function readFileB64(file){
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const buf = new Uint8Array(fr.result);
+      let bin = "";
+      const CH = 0x8000;
+      for (let i = 0; i < buf.length; i += CH) bin += String.fromCharCode.apply(null, buf.subarray(i, i + CH));
+      resolve(btoa(bin));
+    };
+    fr.onerror = () => reject(new Error("read failed: " + file.name));
+    fr.readAsArrayBuffer(file);
+  });
+}
+
+/* --- ensure the target repo exists; auto-create it if missing --- */
+async function ensureRepo(repo, log){
+  const O = repo.owner, R = repo.name;
+  try {
+    return await ghFetch(repo.token, "GET", "/repos/" + O + "/" + R);
+  } catch (e) {
+    if (!/HTTP 404/.test(String(e && e.message))) throw e; // real error - not "missing repo"
+  }
+  const wantPrivate = repo.private !== false; // card checkbox decides (default: private)
+  log("repo " + O + "/" + R + " not found - creating it as " + (wantPrivate ? "PRIVATE" : "PUBLIC") + " (per the card checkbox)...");
+  const me = await ghFetch(repo.token, "GET", "/user");
+  const mine = me.login && String(me.login).toLowerCase() === String(O).toLowerCase();
+  const body = { name: R, private: wantPrivate, auto_init: false, description: "Created by Hermes panel" };
+  const info = mine
+    ? await ghFetch(repo.token, "POST", "/user/repos", body)
+    : await ghFetch(repo.token, "POST", "/orgs/" + O + "/repos", body);
+  log("created " + info.full_name + " (" + (info.private ? "private" : "public") + ")");
+  return info;
+}
+
+/* --- push a folder as ONE commit: blobs -> tree -> commit -> ref --- */
+async function repoPushFiles(repo, fileList, log, prog){
+  if (!repo.token) throw new Error("GitHub token missing");
+  if (!repo.owner || !repo.name) throw new Error("Owner / repository missing");
+  const files = Array.from(fileList).map((f) => ({ f, rel: repoRelPath(f) })).filter((x) => x.rel && !repoSkipPath(x.rel));
+  if (!files.length) throw new Error("No pushable files in the selected folder");
+  const O = repo.owner, R = repo.name, B = repo.branch || "main";
+  const info = await ensureRepo(repo, log);
+  log("repo: " + info.full_name);
+  let parents = [], baseTree = null, bootstrapped = false;
+  try {
+    const r0 = await ghFetch(repo.token, "GET", "/repos/" + O + "/" + R + "/git/ref/heads/" + B);
+    parents = [r0.object.sha];
+    baseTree = (await ghFetch(repo.token, "GET", "/repos/" + O + "/" + R + "/git/commits/" + r0.object.sha)).tree.sha;
+    log("branch '" + B + "' found");
+  } catch {
+    try {
+      const r1 = await ghFetch(repo.token, "GET", "/repos/" + O + "/" + R + "/git/ref/heads/" + info.default_branch);
+      await ghFetch(repo.token, "POST", "/repos/" + O + "/" + R + "/git/refs", { ref: "refs/heads/" + B, sha: r1.object.sha });
+      parents = [r1.object.sha];
+      baseTree = (await ghFetch(repo.token, "GET", "/repos/" + O + "/" + R + "/git/commits/" + r1.object.sha)).tree.sha;
+      log("branch '" + B + "' created from '" + info.default_branch + "'");
+    } catch { log("empty repo detected"); }
+  }
+  if (!parents.length){
+    // Brand-new repo with ZERO commits: GitHub's Git Data API
+    // (blobs/trees/commits) answers "HTTP 409 - Git Repository is
+    // empty." until at least one commit exists. Bootstrap the repo
+    // with a tiny placeholder via the Contents API (which CAN write
+    // to empty repos), then run the normal blob->tree->commit flow
+    // on top. The placeholder is deleted again in the same push.
+    log("initializing empty repo on '" + B + "'...");
+    const init = await ghFetch(repo.token, "PUT", "/repos/" + O + "/" + R + "/contents/.hermes-init", { message: "initialize repository", content: btoa("init"), branch: B });
+    parents = [init.commit.sha];
+    baseTree = (await ghFetch(repo.token, "GET", "/repos/" + O + "/" + R + "/git/commits/" + init.commit.sha)).tree.sha;
+    bootstrapped = true;
+    log("repo initialized - pushing files...");
+  }
+  const tree = [];
+  let done = 0;
+  // Upload blobs with a small parallel worker pool: blobs are
+  // independent and content-addressed, so parallel is safe. 6 at a
+  // time is ~5x faster than one-by-one on high-latency networks while
+  // staying far below GitHub's concurrency comfort zone. Retries for
+  // flaky-network failures live inside ghFetch (single layer).
+  const queue = files.slice();
+  async function uploadOne(item){
+    const { f, rel } = item;
+    const mb = f.size / 1048576;
+    if (f.size > 95 * 1048576){
+      log("SKIP " + rel + " (" + mb.toFixed(1) + " MB - over GitHub's 100 MB limit)");
+      done++; prog(done, files.length + 3);
+      return;
+    }
+    if (mb > 30) log("uploading big file " + rel + " (" + mb.toFixed(1) + " MB) - this can take a while...");
+    let blob;
+    try {
+      blob = await ghFetch(repo.token, "POST", "/repos/" + O + "/" + R + "/git/blobs", { content: await readFileB64(f), encoding: "base64" });
+    } catch (e) {
+      throw new Error("could not upload '" + rel + "' (" + mb.toFixed(2) + " MB): " + (e && e.message));
+    }
+    const exec = rel.endsWith(".sh") || /(^|\/)bin\//.test(rel);
+    tree.push({ path: rel, mode: exec ? "100755" : "100644", type: "blob", sha: blob.sha });
+    done++; prog(done, files.length + 3); log("+ " + rel);
+  }
+  const CONC = Math.min(6, files.length);
+  const workers = [];
+  for (let w = 0; w < CONC; w++){
+    workers.push((async () => {
+      for (;;){
+        const item = queue.shift();
+        if (!item) return;
+        await uploadOne(item);
+      }
+    })());
+  }
+  await Promise.all(workers);
+  if (bootstrapped) tree.push({ path: ".hermes-init", mode: "100644", type: "blob", sha: null }); // sha:null deletes the bootstrap placeholder in this same commit
+  log("building tree...");
+  const nt = await ghFetch(repo.token, "POST", "/repos/" + O + "/" + R + "/git/trees", baseTree ? { base_tree: baseTree, tree } : { tree });
+  prog(files.length + 1, files.length + 3);
+  const commit = await ghFetch(repo.token, "POST", "/repos/" + O + "/" + R + "/git/commits", {
+    message: repo.message || "Update from Hermes panel",
+    tree: nt.sha,
+    parents,
+  });
+  prog(files.length + 2, files.length + 3);
+  try { await ghFetch(repo.token, "PATCH", "/repos/" + O + "/" + R + "/git/refs/heads/" + B, { sha: commit.sha, force: true }); }
+  catch { await ghFetch(repo.token, "POST", "/repos/" + O + "/" + R + "/git/refs", { ref: "refs/heads/" + B, sha: commit.sha }); }
+  prog(files.length + 3, files.length + 3);
+  log("DONE - " + files.length + " files -> https://github.com/" + O + "/" + R + "/tree/" + B);
+}
+
+/* --- encrypt & upsert GitHub Actions repo secrets --- */
+async function repoPushSecrets(repo, log){
+  if (!repo.token) throw new Error("GitHub token missing");
+  if (!repo.owner || !repo.name) throw new Error("Owner / repository missing");
+  const vault = snapshot();
+  const items = [];
+  for (const k of FIELDS) if (repo.secretSel && repo.secretSel[k] === true && vault[k]) items.push([k, vault[k]]); // default: OFF - vault values load from Firebase at runtime, only ticked ones become GitHub secrets
+  for (const s of (repo.extraSecrets || [])) if (s.name && s.value) items.push([s.name.trim().toUpperCase().replace(/[^A-Z0-9_]/g, "_"), s.value]);
+  if (!items.length) throw new Error("Nothing to push - tick vault fields or fill custom secrets");
+  await ensureRepo(repo, log);
+  log("fetching repo public key...");
+  const pk = await ghFetch(repo.token, "GET", "/repos/" + repo.owner + "/" + repo.name + "/actions/secrets/public-key");
+  log("loading crypto (libsodium)...");
+  const sodium = await loadSodium();
+  const keyBin = sodium.from_base64(pk.key, sodium.base64_variants.ORIGINAL);
+  for (const [name, value] of items){
+    const enc = sodium.to_base64(sodium.crypto_box_seal(sodium.from_string(value), keyBin), sodium.base64_variants.ORIGINAL);
+    await ghFetch(repo.token, "PUT", "/repos/" + repo.owner + "/" + repo.name + "/actions/secrets/" + encodeURIComponent(name), { encrypted_value: enc, key_id: pk.key_id });
+    log("secret set: " + name);
+  }
+  log("DONE - " + items.length + " secrets synced (encrypted locally in your browser)");
+}
+
+/* hands-free: after the vault is saved, push secrets to every card with auto-sync on */
+async function reposAutoSync(){
+  for (const repo of reposState){
+    if (repo.autoSync === false || !repo.token || !repo.owner || !repo.name) continue;
+    try {
+      await repoPushSecrets(repo, () => {});
+      toast("Secrets auto-synced to " + repo.owner + "/" + repo.name);
+    } catch (err) {
+      toast("Secret auto-sync failed (" + repo.owner + "/" + repo.name + "): " + err.message, false);
+    }
+  }
+}
+
+/* --- render repo cards --- */
+function renderRepos(){
+  const grid = $("reposGrid");
+  if (!grid) return;
+  const cnt = $("reposCount");
+  if (cnt) cnt.textContent = String(reposState.length);
+  grid.innerHTML = "";
+  if (!reposState.length){
+    const d = document.createElement("div");
+    d.className = "repo-badge";
+    d.textContent = "No repositories yet - click \u201cAdd repository\u201d.";
+    grid.appendChild(d);
+    return;
+  }
+  reposState.forEach((repo) => {
+    const card = document.createElement("div");
+    card.className = "repo-card";
+    card.innerHTML =
+      '<div style="display:flex;align-items:center;gap:8px">' +
+        '<input class="repo-head-lbl rp-label" placeholder="Label">' +
+        '<button class="icobtn rp-del" title="Remove card">\u2715</button>' +
+      '</div>' +
+      '<div class="repo-fields">' +
+        '<input class="rp-owner" placeholder="owner (user / org)" autocomplete="off">' +
+        '<input class="rp-name" placeholder="repository" autocomplete="off">' +
+        '<input class="rp-branch" placeholder="branch (main)" autocomplete="off">' +
+        '<div style="display:flex;gap:6px;min-width:0">' +
+          '<input class="rp-token" type="password" placeholder="GitHub token (PAT)" autocomplete="off" style="flex:1;min-width:0">' +
+          '<button class="icobtn rp-eye" title="Show / hide token"><svg><use href="#i-eye"/></svg></button>' +
+        '</div>' +
+      '</div>' +
+      '<div>' +
+        '<div class="repo-group-title">Files</div>' +
+        '<div class="repo-actions">' +
+          '<input type="file" class="rp-files" webkitdirectory multiple style="display:none">' +
+          '<button class="btn btn-ghost rp-pick">Choose folder\u2026</button>' +
+          '<button class="btn btn-primary rp-push">Push files</button>' +
+          '<span class="repo-badge rp-fileinfo">no folder chosen</span>' +
+        '</div>' +
+      '</div>' +
+      '<div>' +
+        '<div class="repo-group-title">GitHub Action</div>' +
+        '<div class="repo-actions">' +
+          '<button class="btn btn-primary rp-run" title="Dispatch hermes.yml on GitHub Actions">Run action</button>' +
+          '<button class="btn btn-ghost rp-stop" title="Cancel every queued / in-progress run in this repo">Stop runs</button>' +
+          '<span class="repo-badge rp-runinfo"></span>' +
+        '</div>' +
+      '</div>' +
+      '<details class="repo-sec">' +
+        '<summary>Options</summary>' +
+        '<div class="repo-fields" style="margin-top:10px">' +
+          '<input class="rp-msg full" placeholder="commit message (optional)" autocomplete="off">' +
+          '<label class="full" style="display:flex;gap:7px;align-items:center;font-size:12px;color:var(--mid)">' +
+            '<input type="checkbox" class="rp-savetok" style="width:auto"> remember token in my vault' +
+          '</label>' +
+          '<label class="full" style="display:flex;gap:7px;align-items:center;font-size:12px;color:var(--mid)">' +
+            '<input type="checkbox" class="rp-autosync" style="width:auto"> auto-push secrets to this repo every time I hit Save' +
+          '</label>' +
+          '<label class="full" style="display:flex;gap:7px;align-items:center;font-size:12px;color:var(--mid)">' +
+            '<input type="checkbox" class="rp-private" style="width:auto"> create as <b>private</b> repo if it does not exist yet (untick = public)' +
+          '</label>' +
+        '</div>' +
+      '</details>' +
+      '<details class="repo-sec">' +
+        '<summary>Advanced tools</summary>' +
+        '<div class="repo-actions" style="margin-top:10px">' +
+          '<button class="btn btn-ghost rp-test" title="Check token, repository access and branch">Test connection</button>' +
+          '<button class="btn btn-ghost rp-cron" title="Generate a curl command for cron-job.org that triggers hermes.yml on a schedule">Cron curl</button>' +
+          '<button class="btn btn-ghost rp-clean" title="Delete EVERY file in the repository in one clean commit (git history is kept)" style="color:var(--red,#f66)">Clean repo</button>' +
+        '</div>' +
+      '</details>' +
+      '<details class="repo-sec">' +
+        '<summary>Repo secrets (GitHub Actions)</summary>' +
+        '<div class="repo-badge" style="margin-top:8px">Vault values are NOT pushed by default — the workflow loads them from the Firebase vault at runtime. Tick a field only if you also want it as a GitHub Actions secret. <button class="btn btn-ghost rp-selall" style="padding:1px 8px;font-size:11px">all</button> <button class="btn btn-ghost rp-selnone" style="padding:1px 8px;font-size:11px">none</button></div>' +
+        '<div class="sec-list rp-vault"></div>' +
+        '<div class="repo-badge">Custom secrets (e.g. the 4 bootstrap FIREBASE_* values):</div>' +
+        '<div class="rp-extra"></div>' +
+        '<div class="repo-actions" style="margin-top:10px">' +
+          '<button class="btn btn-ghost rp-addsec">+ custom secret</button>' +
+          '<button class="btn btn-primary rp-pushsec">Push secrets</button>' +
+        '</div>' +
+      '</details>' +
+      '<div class="repo-prog"><i></i></div>' +
+      '<div class="repo-log"></div>';
+
+    const q = (sel) => card.querySelector(sel);
+    const logEl = q(".repo-log");
+    const progEl = q(".repo-prog i");
+    const log = (m) => { logEl.classList.add("show"); logEl.textContent += (logEl.textContent ? "\n" : "") + m; logEl.scrollTop = logEl.scrollHeight; };
+    const prog = (d, t) => { progEl.style.width = Math.round((d / Math.max(t, 1)) * 100) + "%"; };
+
+    q(".rp-label").value = repo.label || "";
+    q(".rp-owner").value = repo.owner || "";
+    q(".rp-name").value = repo.name || "";
+    q(".rp-branch").value = repo.branch || "";
+    q(".rp-token").value = repo.token || "";
+    q(".rp-msg").value = repo.message || "";
+    q(".rp-savetok").checked = repo.saveToken !== false;
+    q(".rp-autosync").checked = repo.autoSync !== false;
+    q(".rp-private").checked = repo.private !== false;
+
+    q(".rp-label").oninput = (e) => { repo.label = e.target.value; reposPersistSoon(); };
+    q(".rp-owner").oninput = (e) => { repo.owner = e.target.value.trim(); reposPersistSoon(); };
+    q(".rp-name").oninput = (e) => { repo.name = e.target.value.trim(); reposPersistSoon(); };
+    q(".rp-branch").oninput = (e) => { repo.branch = e.target.value.trim(); reposPersistSoon(); };
+    q(".rp-token").oninput = (e) => { repo.token = e.target.value.trim(); if (repo.saveToken !== false) reposPersistSoon(); };
+    q(".rp-msg").oninput = (e) => { repo.message = e.target.value; reposPersistSoon(); };
+    q(".rp-savetok").onchange = (e) => { repo.saveToken = e.target.checked; reposPersistSoon(); };
+    q(".rp-autosync").onchange = (e) => { repo.autoSync = e.target.checked; reposPersistSoon(); };
+    q(".rp-private").onchange = (e) => { repo.private = e.target.checked; reposPersistSoon(); };
+    q(".rp-eye").onclick = () => { const t = q(".rp-token"); t.type = t.type === "password" ? "text" : "password"; };
+    q(".rp-del").onclick = () => {
+      if (!confirm("Remove card \u201c" + (repo.label || repo.name || "repo") + "\u201d?")) return;
+      reposState = reposState.filter((x) => x !== repo);
+      delete repoFiles[repo.id];
+      renderRepos();
+      reposPersist(true);
+    };
+    q(".rp-pick").onclick = () => q(".rp-files").click();
+    q(".rp-files").onchange = (e) => {
+      repoFiles[repo.id] = e.target.files;
+      const n = e.target.files ? Array.from(e.target.files).filter((f) => !repoSkipPath(repoRelPath(f))).length : 0;
+      q(".rp-fileinfo").textContent = n + " files ready";
+    };
+
+    const busy = async (btn, fn) => {
+      btn.disabled = true;
+      try { await fn(); }
+      catch (err){ log("ERROR: " + err.message); toast(err.message, false); }
+      finally { btn.disabled = false; }
+    };
+    q(".rp-test").onclick = (e) => busy(e.currentTarget, async () => {
+      const me = await ghFetch(repo.token, "GET", "/user");
+      log("token OK - " + me.login);
+      const r = await ghFetch(repo.token, "GET", "/repos/" + repo.owner + "/" + repo.name);
+      log("repo OK - " + r.full_name + " (default: " + r.default_branch + ", " + (r.private ? "private" : "public") + ")");
+    });
+    q(".rp-push").onclick = (e) => busy(e.currentTarget, async () => {
+      const fl = repoFiles[repo.id];
+      if (!fl || !fl.length) throw new Error("Choose a folder first");
+      await repoPushFiles(repo, fl, log, prog);
+      toast("Pushed to " + repo.owner + "/" + repo.name);
+    });
+    /* --- run / stop GitHub Actions from the card --- */
+    const requireRepo = () => {
+      if (!repo.token || !repo.owner || !repo.name) throw new Error("Fill owner, repository and token first");
+    };
+    const resolveRef = async () =>
+      repo.branch || (await ghFetch(repo.token, "GET", "/repos/" + repo.owner + "/" + repo.name)).default_branch || "main";
+    q(".rp-run").onclick = (e) => busy(e.currentTarget, async () => {
+      requireRepo();
+      let hours = prompt("Run duration in HOURS (e.g. 0.5, 1, 3).\nLeave empty for the full 5.5h run:", "");
+      if (hours === null) return; // user cancelled
+      hours = hours.trim();
+      const ref = await resolveRef();
+      const body = { ref };
+      if (hours) body.inputs = { run_hours: hours };
+      try {
+        await ghFetch(repo.token, "POST",
+          "/repos/" + repo.owner + "/" + repo.name + "/actions/workflows/hermes.yml/dispatches", body);
+      } catch (err) {
+        if (/HTTP 404/.test(err.message))
+          throw new Error("hermes.yml not found on branch \u201c" + ref + "\u201d - push the repo files first");
+        throw err;
+      }
+      log("run dispatched (hermes.yml @ " + ref + (hours ? ", run_hours=" + hours : "") + ")");
+      log("watch it: https://github.com/" + repo.owner + "/" + repo.name + "/actions");
+      q(".rp-runinfo").textContent = "run queued " + new Date().toLocaleTimeString();
+      toast("GitHub Action started on " + repo.owner + "/" + repo.name);
+    });
+    q(".rp-stop").onclick = (e) => busy(e.currentTarget, async () => {
+      requireRepo();
+      const base = "/repos/" + repo.owner + "/" + repo.name + "/actions/runs";
+      const active = [];
+      // grab queued runs too - hermes.yml chains its next run, so cancelling
+      // only the in-progress one would let the queued successor start
+      for (const s of ["in_progress", "queued", "requested", "waiting"]){
+        const r = await ghFetch(repo.token, "GET", base + "?status=" + s + "&per_page=50");
+        for (const run of (r.workflow_runs || [])) active.push(run);
+      }
+      if (!active.length){
+        log("no active runs to stop");
+        q(".rp-runinfo").textContent = "no active runs";
+        return;
+      }
+      let n = 0;
+      for (const run of active){
+        try {
+          await ghFetch(repo.token, "POST", base + "/" + run.id + "/cancel");
+          log("cancelled: " + (run.name || "run") + " #" + run.run_number);
+          n++;
+        } catch (err) {
+          log("could not cancel #" + run.run_number + ": " + err.message);
+        }
+      }
+      q(".rp-runinfo").textContent = n + " run(s) cancelled";
+      toast(n + " run(s) cancelled on " + repo.owner + "/" + repo.name);
+    });
+    q(".rp-clean").onclick = (e) => busy(e.currentTarget, async () => {
+      requireRepo();
+      const full = repo.owner + "/" + repo.name;
+      const ref = await resolveRef();
+      let cur;
+      try {
+        cur = (await ghFetch(repo.token, "GET",
+          "/repos/" + full + "/git/ref/heads/" + encodeURIComponent(ref))).object.sha;
+      } catch (err) {
+        if (/HTTP 404|HTTP 409/.test(err.message)) {
+          log("repository is already empty - nothing to clean");
+          toast("Repo is already empty");
+          return;
+        }
+        throw err;
+      }
+      const msg = "clean repository - all files removed via panel";
+      // the empty tree is a well-known git object that exists in every repo
+      const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+      let commit;
+      try {
+        commit = await ghFetch(repo.token, "POST", "/repos/" + full + "/git/commits",
+          { message: msg, tree: EMPTY_TREE, parents: [cur] });
+      } catch (err) {
+        // fallback: build an explicit deletion tree (every blob -> sha null)
+        const curCommit = await ghFetch(repo.token, "GET", "/repos/" + full + "/git/commits/" + cur);
+        const curTree = await ghFetch(repo.token, "GET",
+          "/repos/" + full + "/git/trees/" + curCommit.tree.sha + "?recursive=1");
+        const dels = (curTree.tree || []).filter((t) => t.type === "blob")
+          .map((t) => ({ path: t.path, mode: t.mode, type: "blob", sha: null }));
+        if (!dels.length) { log("repository is already empty - nothing to clean"); toast("Repo is already empty"); return; }
+        const nt = await ghFetch(repo.token, "POST", "/repos/" + full + "/git/trees",
+          { base_tree: curCommit.tree.sha, tree: dels });
+        commit = await ghFetch(repo.token, "POST", "/repos/" + full + "/git/commits",
+          { message: msg, tree: nt.sha, parents: [cur] });
+      }
+      await ghFetch(repo.token, "PATCH",
+        "/repos/" + full + "/git/refs/heads/" + encodeURIComponent(ref),
+        { sha: commit.sha, force: true });
+      log(full + " cleaned - every file removed on \u201c" + ref + "\u201d");
+      log("tip: the old files are still in git history - push fresh files any time");
+      q(".rp-runinfo").textContent = "repo cleaned " + new Date().toLocaleTimeString();
+      toast("All files removed from " + full);
+    });
+    q(".rp-cron").onclick = (e) => busy(e.currentTarget, async () => {
+      requireRepo();
+      const full = repo.owner + "/" + repo.name;
+      const ref = await resolveRef();
+      const url = "https://api.github.com/repos/" + full +
+        "/actions/workflows/hermes.yml/dispatches";
+      const bodyStr = JSON.stringify({ ref: ref });
+      const curl = [
+        "curl -X POST \\",
+        "  -H \"Accept: application/vnd.github+json\" \\",
+        "  -H \"Authorization: Bearer " + repo.token + "\" \\",
+        "  -H \"X-GitHub-Api-Version: 2022-11-28\" \\",
+        "  -d '" + bodyStr + "' \\",
+        "  " + url
+      ].join("\n");
+      let copied = false;
+      try { await navigator.clipboard.writeText(curl); copied = true; } catch (err) {
+        try {
+          const ta = document.createElement("textarea");
+          ta.value = curl; document.body.appendChild(ta);
+          ta.select(); document.execCommand("copy");
+          document.body.removeChild(ta); copied = true;
+        } catch (err2) {}
+      }
+      log("cron-job.org curl for " + full + (copied ? " (copied to clipboard):" : ":"));
+      log(curl);
+      log("cron-job.org setup (if you paste fields instead of curl):");
+      log("  URL: " + url);
+      log("  Method: POST");
+      log("  Header: Accept = application/vnd.github+json");
+      log("  Header: Authorization = Bearer " + repo.token);
+      log("  Header: X-GitHub-Api-Version = 2022-11-28");
+      log("  Request body: " + bodyStr);
+      log("tip: hermes.yml already chains its next run - use this cron only as a safety net (e.g. every 6h) so a crashed chain restarts by itself");
+      toast(copied ? "curl copied to clipboard" : "curl printed in the log below");
+    });
+    q(".rp-pushsec").onclick = (e) => busy(e.currentTarget, async () => {
+      await repoPushSecrets(repo, log);
+      toast("Secrets synced to " + repo.owner + "/" + repo.name);
+    });
+
+    q(".rp-selall").onclick = () => { repo.secretSel = {}; FIELDS.forEach((f2) => { repo.secretSel[f2] = true; }); renderRepos(); reposPersistSoon(); };
+    q(".rp-selnone").onclick = () => { repo.secretSel = {}; renderRepos(); reposPersistSoon(); };
+
+    const vaultBox = q(".rp-vault");
+    FIELDS.forEach((k) => {
+      const lab = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.style.width = "auto";
+      cb.checked = !!(repo.secretSel && repo.secretSel[k] === true); // default: OFF - runtime reads these from the Firebase vault
+      cb.onchange = () => { repo.secretSel = repo.secretSel || {}; repo.secretSel[k] = cb.checked; reposPersistSoon(); };
+      const sp = document.createElement("span");
+      sp.textContent = k;
+      lab.appendChild(cb);
+      lab.appendChild(sp);
+      vaultBox.appendChild(lab);
+    });
+
+    const extraBox = q(".rp-extra");
+    const renderExtra = () => {
+      extraBox.innerHTML = "";
+      (repo.extraSecrets || []).forEach((s, idx) => {
+        const row = document.createElement("div");
+        row.className = "xsec-row";
+        const n = document.createElement("input");
+        n.placeholder = "SECRET_NAME"; n.value = s.name || ""; n.autocomplete = "off";
+        const v = document.createElement("input");
+        v.placeholder = "value"; v.type = "password"; v.value = s.value || ""; v.autocomplete = "off";
+        const del = document.createElement("button");
+        del.className = "icobtn"; del.textContent = "\u2715"; del.title = "Remove secret row";
+        n.oninput = () => { s.name = n.value; reposPersistSoon(); };
+        v.oninput = () => { s.value = v.value; reposPersistSoon(); };
+        del.onclick = () => { repo.extraSecrets.splice(idx, 1); renderExtra(); reposPersistSoon(); };
+        row.appendChild(n); row.appendChild(v); row.appendChild(del);
+        extraBox.appendChild(row);
+      });
+    };
+    renderExtra();
+    q(".rp-addsec").onclick = () => { repo.extraSecrets = repo.extraSecrets || []; repo.extraSecrets.push({ name: "", value: "" }); renderExtra(); };
+
+    grid.appendChild(card);
+  });
+}
+if ($("repoAdd")) $("repoAdd").onclick = () => { reposState.push(newRepoCard()); renderRepos(); reposPersistSoon(); };
+if ($("repoSaveBtn")) $("repoSaveBtn").onclick = () => reposPersist(false);
+
+boot();
+</script>
+</body>
+</html>
